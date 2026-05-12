@@ -39,6 +39,14 @@ export default function HomePage() {
 
   return (
     <main className="min-h-screen flex flex-col items-center justify-center gap-8 p-8">
+      <div className="absolute top-4 right-4">
+        <button
+          onClick={() => router.push('/projects')}
+          className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+        >
+          My Projects →
+        </button>
+      </div>
       <h1 className="text-3xl font-bold">Choose your modules</h1>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full max-w-2xl">
         {MODULES.map(mod => (

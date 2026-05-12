@@ -108,6 +108,12 @@ function AISandboxPage() {
   const [sandboxFiles, setSandboxFiles] = useState<Record<string, string>>({});
   const [hasInitialSubmission, setHasInitialSubmission] = useState<boolean>(false);
   const [fileStructure, setFileStructure] = useState<string>('');
+  const [projectId, setProjectId] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') {
+      return new URLSearchParams(window.location.search).get('project')
+    }
+    return null
+  });
 
   const [moduleAssembly, setModuleAssembly] = useState<{
     modules: string[]
@@ -175,7 +181,48 @@ function AISandboxPage() {
     const initializePage = async () => {
       // Prevent double execution in React StrictMode
       if (sandboxCreated) return;
-      
+
+      // Create or load project from DB
+      const existingProjectId = searchParams.get('project')
+      if (existingProjectId) {
+        setProjectId(existingProjectId)
+        // Load chat history
+        try {
+          const res = await fetch(`/api/projects/${existingProjectId}/messages`)
+          if (res.ok) {
+            const { messages } = await res.json() as { messages: Array<{ role: string; content: string; message_type: string; metadata: any; created_at: string }> }
+            if (messages.length > 0) {
+              setChatMessages(messages.map(m => ({
+                content: m.content,
+                type: m.role === 'user' ? 'user' : m.role === 'assistant' ? 'ai' : (m.message_type as ChatMessage['type']),
+                timestamp: new Date(m.created_at),
+                metadata: m.metadata
+              })))
+            }
+          }
+        } catch (e) {
+          console.error('[project] Failed to load chat history', e)
+        }
+      } else {
+        // Create new project
+        try {
+          const res = await fetch('/api/projects', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: 'Untitled Project' })
+          })
+          if (res.ok) {
+            const { project } = await res.json() as { project: { id: string } }
+            setProjectId(project.id)
+            const newParams = new URLSearchParams(window.location.search)
+            newParams.set('project', project.id)
+            window.history.replaceState({}, '', `/generation?${newParams.toString()}`)
+          }
+        } catch (e) {
+          console.error('[project] Failed to create project', e)
+        }
+      }
+
       // First check URL parameters (from home page navigation)
       const urlParam = searchParams.get('url');
       const templateParam = searchParams.get('template');
@@ -460,6 +507,20 @@ function AISandboxPage() {
       }
       return [...prev, { content, type, timestamp: new Date(), metadata }];
     });
+
+    // Persist user and AI messages to DB (fire-and-forget)
+    if ((type === 'user' || type === 'ai') && projectId) {
+      fetch(`/api/projects/${projectId}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          role: type === 'user' ? 'user' : 'assistant',
+          content,
+          message_type: type,
+          metadata: metadata ?? null
+        })
+      }).catch(e => console.error('[project] Failed to save message', e))
+    }
   };
   
   const checkAndInstallPackages = async () => {
@@ -631,6 +692,19 @@ function AISandboxPage() {
         newParams.set('sandbox', data.sandboxId);
         newParams.set('model', aiModel);
         router.push(`/generation?${newParams.toString()}`, { scroll: false });
+
+        // Persist sandbox info to project
+        if (projectId) {
+          fetch(`/api/projects/${projectId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sandbox_id: data.sandboxId,
+              sandbox_url: data.url,
+              sandbox_provider: data.provider ?? 'unknown'
+            })
+          }).catch(e => console.error('[project] Failed to update sandbox info', e))
+        }
         
         // Fade out loading background after sandbox loads
         setTimeout(() => {
@@ -1146,6 +1220,16 @@ Tip: I automatically detect and install npm packages from your code imports (lik
           setSandboxFiles(data.files || {});
           setFileStructure(data.structure || '');
           console.log('[fetchSandboxFiles] Updated file list:', Object.keys(data.files || {}).length, 'files');
+
+          // Persist files to DB (fire-and-forget)
+          if (projectId && data.files && Object.keys(data.files).length > 0) {
+            const filesArray = Object.entries(data.files as Record<string, string>).map(([path, content]) => ({ path, content }))
+            fetch(`/api/projects/${projectId}/files`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ files: filesArray })
+            }).catch(e => console.error('[project] Failed to save files', e))
+          }
         }
       }
     } catch (error) {
@@ -3345,7 +3429,15 @@ Focus on the key sections and content, making it clean and modern.`;
     <HeaderProvider>
       <div className="font-sans bg-background text-foreground h-screen flex flex-col">
       <div className="bg-white py-[15px] py-[8px] border-b border-border-faint flex items-center justify-between shadow-sm">
-        <HeaderBrandKit />
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => router.push('/projects')}
+            className="ml-3 text-sm text-muted-foreground hover:text-foreground transition-colors"
+          >
+            ← Projects
+          </button>
+          <HeaderBrandKit />
+        </div>
         <div className="flex items-center gap-2">
           {/* Model Selector - Left side */}
           <select
