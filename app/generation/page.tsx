@@ -182,8 +182,9 @@ function AISandboxPage() {
       // Prevent double execution in React StrictMode
       if (sandboxCreated) return;
 
-      // Create or load project from DB
+      // Create or load project from DB — use local var so it's available immediately
       const existingProjectId = searchParams.get('project')
+      let localProjectId: string | null = existingProjectId
       if (existingProjectId) {
         setProjectId(existingProjectId)
         // Load chat history
@@ -213,6 +214,7 @@ function AISandboxPage() {
           })
           if (res.ok) {
             const { project } = await res.json() as { project: { id: string } }
+            localProjectId = project.id
             setProjectId(project.id)
             const newParams = new URLSearchParams(window.location.search)
             newParams.set('project', project.id)
@@ -336,26 +338,44 @@ function AISandboxPage() {
           if (data.success) {
             setSandboxData(data);
             updateStatus('Sandbox active', true);
+
             if (data.resumed) {
-              addChatMessage('Sandbox сэргэлээ! Үргэлжлүүлж болно.', 'system');
+              addChatMessage('Sandbox сэргэлээ! Файлуудыг ачаалж байна...', 'system');
             } else {
-              addChatMessage(`Өмнөх sandbox унтарсан байна — шинэ sandbox үүслээ. ID: ${data.sandboxId}`, 'system');
-              // Update URL and project with new sandbox info
+              addChatMessage(`Өмнөх sandbox унтарсан байна — шинэ sandbox үүслээ.`, 'system');
+              // Update URL with new sandbox id
               const newParams = new URLSearchParams(searchParams.toString());
               newParams.set('sandbox', data.sandboxId);
               router.replace(`/generation?${newParams.toString()}`);
-              if (projectId) {
-                fetch(`/api/projects/${projectId}`, {
+              // Update project in DB with new sandbox (await so sync sees correct id)
+              if (localProjectId) {
+                await fetch(`/api/projects/${localProjectId}`, {
                   method: 'PUT',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ sandbox_id: data.sandboxId, sandbox_url: data.url, sandbox_provider: data.provider }),
                 }).catch(() => {});
               }
             }
+
+            // Sync saved files from DB into the sandbox
+            if (localProjectId) {
+              try {
+                const syncRes = await fetch(`/api/projects/${localProjectId}/sync`, { method: 'POST' });
+                const syncData = await syncRes.json() as { synced?: number; total?: number };
+                if (syncData.total && syncData.total > 0) {
+                  addChatMessage(`${syncData.synced}/${syncData.total} файл sandbox-д ачааллаа.`, 'system');
+                  // Restart Vite so it picks up the restored files
+                  await fetch('/api/restart-vite', { method: 'POST' });
+                }
+              } catch (e) {
+                console.error('[project] File sync failed', e);
+              }
+            }
+
             setTimeout(() => {
               if (iframeRef.current) iframeRef.current.src = data.url;
-            }, 100);
-            setTimeout(fetchSandboxFiles, 1000);
+            }, 2000); // wait a bit for Vite to restart
+            setTimeout(fetchSandboxFiles, 3000);
           } else {
             throw new Error(data.error || 'Resume failed');
           }
