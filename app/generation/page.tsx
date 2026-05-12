@@ -318,15 +318,47 @@ function AISandboxPage() {
 
       // Check if sandbox ID is in URL
       const sandboxIdParam = searchParams.get('sandbox');
-      
+
       setLoading(true);
       try {
         if (sandboxIdParam) {
-          console.log('[home] Attempting to restore sandbox:', sandboxIdParam);
-          // For now, just create a new sandbox - you could enhance this to actually restore
-          // the specific sandbox if your backend supports it
+          console.log('[home] Attempting to resume sandbox:', sandboxIdParam);
+          addChatMessage('Sandbox-г шалгаж байна...', 'system');
           sandboxCreated = true;
-          await createSandbox(true);
+
+          const res = await fetch('/api/resume-sandbox', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sandboxId: sandboxIdParam }),
+          });
+          const data = await res.json();
+
+          if (data.success) {
+            setSandboxData(data);
+            updateStatus('Sandbox active', true);
+            if (data.resumed) {
+              addChatMessage('Sandbox сэргэлээ! Үргэлжлүүлж болно.', 'system');
+            } else {
+              addChatMessage(`Өмнөх sandbox унтарсан байна — шинэ sandbox үүслээ. ID: ${data.sandboxId}`, 'system');
+              // Update URL and project with new sandbox info
+              const newParams = new URLSearchParams(searchParams.toString());
+              newParams.set('sandbox', data.sandboxId);
+              router.replace(`/generation?${newParams.toString()}`);
+              if (projectId) {
+                fetch(`/api/projects/${projectId}`, {
+                  method: 'PUT',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ sandbox_id: data.sandboxId, sandbox_url: data.url, sandbox_provider: data.provider }),
+                }).catch(() => {});
+              }
+            }
+            setTimeout(() => {
+              if (iframeRef.current) iframeRef.current.src = data.url;
+            }, 100);
+            setTimeout(fetchSandboxFiles, 1000);
+          } else {
+            throw new Error(data.error || 'Resume failed');
+          }
         } else {
           console.log('[home] No sandbox in URL, creating new sandbox automatically...');
           sandboxCreated = true;

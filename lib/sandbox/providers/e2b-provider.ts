@@ -7,20 +7,27 @@ export class E2BProvider extends SandboxProvider {
   private existingFiles: Set<string> = new Set();
 
   /**
-   * Attempt to reconnect to an existing E2B sandbox
+   * Attempt to reconnect to an existing E2B sandbox by its ID.
+   * Returns the SandboxInfo if successful, null if the sandbox is no longer running.
    */
-  async reconnect(sandboxId: string): Promise<boolean> {
+  async reconnect(sandboxId: string): Promise<SandboxInfo | null> {
     try {
-      
-      // Try to connect to existing sandbox
-      // Note: E2B SDK doesn't directly support reconnection, but we can try to recreate
-      // For now, return false to indicate reconnection isn't supported
-      // In the future, E2B may add this capability
-      
-      return false;
+      const connected = await (Sandbox as any).connect(sandboxId, {
+        apiKey: this.config.e2b?.apiKey || process.env.E2B_API_KEY,
+      });
+      this.sandbox = connected;
+      const host = (this.sandbox as any).getHost(appConfig.e2b.vitePort);
+      this.sandboxInfo = {
+        sandboxId,
+        url: `https://${host}`,
+        provider: 'e2b',
+        createdAt: new Date(),
+      };
+      console.log(`[E2BProvider] Reconnected to sandbox ${sandboxId}`);
+      return this.sandboxInfo;
     } catch (error) {
       console.error(`[E2BProvider] Failed to reconnect to sandbox ${sandboxId}:`, error);
-      return false;
+      return null;
     }
   }
 
