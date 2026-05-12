@@ -108,7 +108,14 @@ function AISandboxPage() {
   const [sandboxFiles, setSandboxFiles] = useState<Record<string, string>>({});
   const [hasInitialSubmission, setHasInitialSubmission] = useState<boolean>(false);
   const [fileStructure, setFileStructure] = useState<string>('');
-  
+
+  const [moduleAssembly, setModuleAssembly] = useState<{
+    modules: string[]
+    steps: Array<{ key: string; message: string; done: boolean }>
+    status: 'idle' | 'assembling' | 'done' | 'error'
+    error?: string
+  } | null>(null)
+
   const [conversationContext, setConversationContext] = useState<{
     scrapedWebsites: Array<{ url: string; content: any; timestamp: Date }>;
     generatedComponents: Array<{ name: string; path: string; content: string }>;
@@ -304,7 +311,63 @@ function AISandboxPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Run only on mount
-  
+
+  useEffect(() => {
+    const modulesParam = searchParams.get('modules')
+    if (!modulesParam) return
+    const modules = modulesParam.split(',').filter(Boolean)
+    if (modules.length === 0) return
+
+    setModuleAssembly({ modules, steps: [], status: 'assembling' })
+    setShowHomeScreen(false)
+
+    let cancelled = false
+    ;(async () => {
+      const res = await fetch('/api/generate-ai-code-stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ modules, instanceConfig: {} }),
+      })
+
+      if (!res.ok) {
+        const err = await res.json() as { error: string; name?: string }
+        if (!cancelled) setModuleAssembly(prev => prev ? { ...prev, status: 'error', error: err.error } : null)
+        return
+      }
+
+      const reader = res.body?.getReader()
+      const decoder = new TextDecoder()
+      if (!reader) return
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done || cancelled) break
+        const lines = decoder.decode(value).split('\n')
+        for (const line of lines) {
+          if (!line.startsWith('data:')) continue
+          const event = JSON.parse(line.slice(5).trim()) as { type: string; key: string; message: string }
+          if (event.type === 'step') {
+            setModuleAssembly(prev => prev ? {
+              ...prev,
+              steps: [...prev.steps, { key: event.key, message: event.message, done: false }],
+            } : null)
+          } else if (event.type === 'done') {
+            setModuleAssembly(prev => prev ? {
+              ...prev,
+              steps: [...prev.steps, { key: event.key, message: event.message, done: true }],
+              status: 'done',
+            } : null)
+          } else if (event.type === 'error') {
+            setModuleAssembly(prev => prev ? { ...prev, status: 'error', error: event.message } : null)
+          }
+        }
+      }
+    })()
+
+    return () => { cancelled = true }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   useEffect(() => {
     // Handle Escape key for home screen
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -3339,6 +3402,40 @@ Focus on the key sections and content, making it clean and modern.`;
       </div>
 
       <div className="flex-1 flex overflow-hidden">
+        {/* Module Assembly Panel — shown when navigating from onboarding with ?modules= */}
+        {moduleAssembly && (
+          <div className="w-[400px] flex-shrink-0 flex flex-col border-r border-border bg-background p-6 gap-4">
+            <div>
+              <h2 className="text-lg font-semibold mb-1">Assembling modules</h2>
+              <p className="text-sm text-muted-foreground">{moduleAssembly.modules.join(', ')}</p>
+            </div>
+            <div className="flex flex-col gap-2">
+              {moduleAssembly.steps.map((step, i) => (
+                <div key={i} className="flex items-center gap-2 text-sm">
+                  <span className="text-green-500">✓</span>
+                  <span>{step.message}</span>
+                </div>
+              ))}
+              {moduleAssembly.status === 'assembling' && (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <span className="animate-spin inline-block">⟳</span>
+                  <span>Working…</span>
+                </div>
+              )}
+            </div>
+            {moduleAssembly.status === 'done' && (
+              <div className="mt-2 p-3 bg-green-50 text-green-800 rounded text-sm border border-green-200">
+                Assembly complete — modules ready
+              </div>
+            )}
+            {moduleAssembly.status === 'error' && (
+              <div className="mt-2 p-3 bg-red-50 text-red-800 rounded text-sm border border-red-200">
+                Error: {moduleAssembly.error}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Center Panel - AI Chat (1/3 of remaining width) */}
         <div className="flex-1 max-w-[400px] flex flex-col border-r border-border bg-background">
           {/* Sidebar Input Component */}
