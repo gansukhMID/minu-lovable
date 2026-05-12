@@ -1867,7 +1867,11 @@ Provide the complete file content without any truncation. Include all necessary 
           });
         }
       } finally {
-        await writer.close();
+        try {
+          await writer.close();
+        } catch {
+          // Stream already closed (e.g. client disconnected)
+        }
       }
     })();
     
