@@ -323,7 +323,7 @@ function AISandboxPage() {
 
     let cancelled = false
     ;(async () => {
-      const res = await fetch('/api/generate-ai-code-stream', {
+      const res = await fetch('/api/assemble-modules', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ modules, instanceConfig: {} }),
