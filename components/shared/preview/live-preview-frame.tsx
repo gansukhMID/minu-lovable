@@ -160,7 +160,7 @@ export default function LivePreviewFrame({
     }
 
     // Create new WebSocket connection
-    const wsUrl = `wss://api.firecrawl.dev/agent-livecast?userProvidedId=${sessionId}`;
+    const wsUrl = `wss://${process.env.NEXT_PUBLIC_LIVECAST_HOST ?? "api.firecrawl.dev"}/agent-livecast?userProvidedId=${sessionId}`;
 
     try {
       const ws = new WebSocket(wsUrl);
