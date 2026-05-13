@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { sandboxManager } from '@/lib/sandbox/sandbox-manager'
 import { SandboxFactory } from '@/lib/sandbox/factory'
 import { E2BProvider } from '@/lib/sandbox/providers/e2b-provider'
+import { MinuProvider } from '@/lib/sandbox/providers/minu-provider'
 import type { SandboxState } from '@/types/sandbox'
 
 declare global {
@@ -35,10 +36,28 @@ export async function POST(request: NextRequest) {
     })
   }
 
-  // 2. Try provider-specific reconnect (E2B supports Sandbox.connect)
+  // 2. Try provider-specific reconnect
   const provider = SandboxFactory.create()
   if (provider instanceof E2BProvider) {
     console.log(`[resume-sandbox] Attempting E2B reconnect for ${sandboxId}`)
+    const info = await provider.reconnect(sandboxId)
+    if (info) {
+      sandboxManager.registerSandbox(info.sandboxId, provider)
+      global.activeSandboxProvider = provider
+      global.sandboxData = { sandboxId: info.sandboxId, url: info.url }
+      if (!global.existingFiles) global.existingFiles = new Set()
+      return NextResponse.json({
+        success: true,
+        resumed: true,
+        sandboxId: info.sandboxId,
+        url: info.url,
+        provider: info.provider,
+      })
+    }
+  }
+
+  if (provider instanceof MinuProvider) {
+    console.log(`[resume-sandbox] Attempting Minu reconnect for ${sandboxId}`)
     const info = await provider.reconnect(sandboxId)
     if (info) {
       sandboxManager.registerSandbox(info.sandboxId, provider)
@@ -69,6 +88,7 @@ export async function POST(request: NextRequest) {
     const newProvider = SandboxFactory.create()
     const newInfo = await newProvider.createSandbox()
     await newProvider.setupViteApp()
+    const minuCreateResponse = newProvider instanceof MinuProvider ? newProvider.getLastCreateResponse() : null
 
     sandboxManager.registerSandbox(newInfo.sandboxId, newProvider)
     global.activeSandboxProvider = newProvider
@@ -85,6 +105,7 @@ export async function POST(request: NextRequest) {
       sandboxId: newInfo.sandboxId,
       url: newInfo.url,
       provider: newInfo.provider,
+      ...(minuCreateResponse ?? {}),
     })
   } catch (error) {
     console.error('[resume-sandbox] Failed to create new sandbox:', error)

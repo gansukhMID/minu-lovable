@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { SandboxFactory } from '@/lib/sandbox/factory';
+import { MinuProvider } from '@/lib/sandbox/providers/minu-provider';
 // SandboxProvider type is used through SandboxFactory
 import type { SandboxState } from '@/types/sandbox';
 import { sandboxManager } from '@/lib/sandbox/sandbox-manager';
@@ -70,12 +71,15 @@ export async function POST() {
     
     console.log('[create-ai-sandbox-v2] Sandbox ready at:', sandboxInfo.url);
     
+    const minuCreateResponse = provider instanceof MinuProvider ? provider.getLastCreateResponse() : null;
+
     return NextResponse.json({
       success: true,
       sandboxId: sandboxInfo.sandboxId,
       url: sandboxInfo.url,
       provider: sandboxInfo.provider,
-      message: 'Sandbox created and Vite React app initialized'
+      message: 'Sandbox created and Vite React app initialized',
+      ...(minuCreateResponse ?? {})
     });
 
   } catch (error) {

@@ -613,10 +613,11 @@ export async function POST(request: NextRequest) {
 
             const isUpdate = global.existingFiles.has(normalizedPath);
 
-            // Remove any CSS imports from JSX/JS files (we're using Tailwind)
+            // Remove component-scoped CSS imports from JSX/JS files (we're using Tailwind)
+            // Keep index.css and App.css imports — those carry Tailwind directives and global styles
             let fileContent = file.content;
             if (file.path.endsWith('.jsx') || file.path.endsWith('.js') || file.path.endsWith('.tsx') || file.path.endsWith('.ts')) {
-              fileContent = fileContent.replace(/import\s+['"]\.\/[^'"]+\.css['"];?\s*\n?/g, '');
+              fileContent = fileContent.replace(/import\s+['"]\.\/(?!index\.css|App\.css)[^'"]+\.css['"];?\s*\n?/g, '');
             }
 
             // Fix common Tailwind CSS errors in CSS files

@@ -115,6 +115,17 @@ function AISandboxPage() {
     return null
   });
 
+  const [projectName, setProjectName] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return new URLSearchParams(window.location.search).get('projectName') || 'Untitled Project'
+    }
+    return 'Untitled Project'
+  });
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [nameInputValue, setNameInputValue] = useState('');
+  const [showSandboxController, setShowSandboxController] = useState(false);
+  const sandboxControllerRef = useRef<HTMLDivElement>(null);
+
   const [moduleAssembly, setModuleAssembly] = useState<{
     modules: string[]
     steps: Array<{ key: string; message: string; done: boolean }>
@@ -210,7 +221,7 @@ function AISandboxPage() {
           const res = await fetch('/api/projects', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: 'Untitled Project' })
+            body: JSON.stringify({ name: projectName })
           })
           if (res.ok) {
             const { project } = await res.json() as { project: { id: string } }
@@ -375,14 +386,16 @@ function AISandboxPage() {
             setTimeout(() => {
               if (iframeRef.current) iframeRef.current.src = data.url;
             }, 2000); // wait a bit for Vite to restart
-            setTimeout(fetchSandboxFiles, 3000);
+            setTimeout(() => {
+              void fetchSandboxFiles(data, localProjectId ?? undefined);
+            }, 3000);
           } else {
             throw new Error(data.error || 'Resume failed');
           }
         } else {
           console.log('[home] No sandbox in URL, creating new sandbox automatically...');
           sandboxCreated = true;
-          await createSandbox(true);
+          await createSandbox(true, localProjectId ?? undefined);
         }
         
         // If we have a URL from the home page, mark for automatic start
@@ -507,6 +520,17 @@ function AISandboxPage() {
     }
   }, [showHomeScreen, homeUrlInput]); // eslint-disable-line react-hooks/exhaustive-deps
 
+
+  useEffect(() => {
+    if (!showSandboxController) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (sandboxControllerRef.current && !sandboxControllerRef.current.contains(e.target as Node)) {
+        setShowSandboxController(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showSandboxController]);
 
   useEffect(() => {
     // Only check sandbox status on mount if we don't already have sandboxData
@@ -705,7 +729,7 @@ function AISandboxPage() {
 
   const sandboxCreationRef = useRef<boolean>(false);
   
-  const createSandbox = async (fromHomeScreen = false) => {
+  const createSandbox = async (fromHomeScreen = false, projectIdOverride?: string) => {
     // Prevent duplicate sandbox creation
     if (sandboxCreationRef.current) {
       console.log('[createSandbox] Sandbox creation already in progress, skipping...');
@@ -731,6 +755,7 @@ function AISandboxPage() {
       console.log('[createSandbox] Response data:', data);
       
       if (data.success) {
+        const targetProjectId = projectIdOverride ?? projectId;
         sandboxCreationRef.current = false; // Reset the ref on success
         console.log('[createSandbox] Setting sandboxData from creation:', data);
         setSandboxData(data);
@@ -746,8 +771,8 @@ function AISandboxPage() {
         router.push(`/generation?${newParams.toString()}`, { scroll: false });
 
         // Persist sandbox info to project
-        if (projectId) {
-          fetch(`/api/projects/${projectId}`, {
+        if (targetProjectId) {
+          fetch(`/api/projects/${targetProjectId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -767,8 +792,9 @@ function AISandboxPage() {
           displayStructure(data.structure);
         }
         
-        // Fetch sandbox files after creation
-        setTimeout(fetchSandboxFiles, 1000);
+        // Sync fresh Vite template files from sandbox into project DB.
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        await fetchSandboxFiles(data, targetProjectId);
         
         // For Vercel sandboxes, Vite is already started during setupViteApp
         // No need to restart it immediately after creation
@@ -1255,8 +1281,10 @@ Tip: I automatically detect and install npm packages from your code imports (lik
     }
   };
 
-  const fetchSandboxFiles = async () => {
-    if (!sandboxData) return;
+  const fetchSandboxFiles = async (sandboxOverride?: SandboxData | null, projectIdOverride?: string | null) => {
+    const effectiveSandboxData = sandboxOverride ?? sandboxData;
+    const effectiveProjectId = projectIdOverride ?? projectId;
+    if (!effectiveSandboxData) return;
     
     try {
       const response = await fetch('/api/get-sandbox-files', {
@@ -1272,11 +1300,15 @@ Tip: I automatically detect and install npm packages from your code imports (lik
           setSandboxFiles(data.files || {});
           setFileStructure(data.structure || '');
           console.log('[fetchSandboxFiles] Updated file list:', Object.keys(data.files || {}).length, 'files');
+          if (!selectedFile && data.files && Object.keys(data.files).length > 0) {
+            const firstFile = Object.keys(data.files).sort()[0];
+            if (firstFile) setSelectedFile(firstFile);
+          }
 
           // Persist files to DB (fire-and-forget)
-          if (projectId && data.files && Object.keys(data.files).length > 0) {
+          if (effectiveProjectId && data.files && Object.keys(data.files).length > 0) {
             const filesArray = Object.entries(data.files as Record<string, string>).map(([path, content]) => ({ path, content }))
-            fetch(`/api/projects/${projectId}/files`, {
+            fetch(`/api/projects/${effectiveProjectId}/files`, {
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ files: filesArray })
@@ -1341,7 +1373,19 @@ Tip: I automatically detect and install npm packages from your code imports (lik
 //   };
 
   const renderMainContent = () => {
-    if (activeTab === 'generation' && (generationProgress.isGenerating || generationProgress.files.length > 0)) {
+    const sandboxExplorerFiles = Object.entries(sandboxFiles).map(([path, content]) => {
+      const ext = path.split('.').pop()?.toLowerCase();
+      const type =
+        ext === 'css' ? 'css' :
+        ext === 'json' ? 'json' :
+        ext === 'html' ? 'html' :
+        'javascript';
+      return { path, content, type, completed: true, edited: false };
+    });
+    const explorerFiles = generationProgress.files.length > 0 ? generationProgress.files : sandboxExplorerFiles;
+    const hasCodeFiles = explorerFiles.length > 0;
+
+    if (activeTab === 'generation' && (generationProgress.isGenerating || hasCodeFiles)) {
       return (
         /* Generation Tab Content */
         <div className="absolute inset-0 flex overflow-hidden">
@@ -1390,7 +1434,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
                       // );
                       
                       // Process all files from generation progress
-                      generationProgress.files.forEach(file => {
+                      explorerFiles.forEach(file => {
                         const parts = file.path.split('/');
                         const dir = parts.length > 1 ? parts.slice(0, -1).join('/') : '';
                         const fileName = parts[parts.length - 1];
@@ -1402,8 +1446,22 @@ Tip: I automatically detect and install npm packages from your code imports (lik
                         });
                       });
                       
-                      return Object.entries(fileTree).map(([dir, files]) => (
-                        <div key={dir} className="mb-1">
+                      const sortedEntries = Object.entries(fileTree).sort(([dirA], [dirB]) => {
+                        const depthA = dirA ? dirA.split('/').length : 0;
+                        const depthB = dirB ? dirB.split('/').length : 0;
+                        if (depthA !== depthB) return depthA - depthB;
+                        return dirA.localeCompare(dirB);
+                      });
+
+                      return sortedEntries.map(([dir, files]) => {
+                        const depth = dir ? dir.split('/').length : 0;
+                        const parentDir = dir.includes('/') ? dir.slice(0, dir.lastIndexOf('/')) : '';
+                        const dirName = dir ? dir.split('/').pop() || dir : '';
+                        const isVisible = !parentDir || expandedFolders.has(parentDir);
+                        if (!isVisible) return null;
+
+                        return (
+                        <div key={dir} className="mb-1" style={dir ? { marginLeft: `${Math.max(0, depth - 1) * 12}px` } : undefined}>
                           {dir && (
                             <div 
                               className="flex items-center gap-2 py-0.5 px-3 hover:bg-gray-100 rounded cursor-pointer text-gray-700"
@@ -1419,7 +1477,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
                               ) : (
                                 <BsFolderFill style={{ width: '16px', height: '16px' }} className="text-yellow-600" />
                               )}
-                              <span className="text-gray-700">{dir.split('/').pop()}</span>
+                              <span className="text-gray-700">{dirName}</span>
                             </div>
                           )}
                           {(!dir || expandedFolders.has(dir)) && (
@@ -1453,7 +1511,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
                             </div>
                           )}
                         </div>
-                      ));
+                      )});
                     })()}
                   </div>
                 )}
@@ -1533,7 +1591,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
                         >
                           {(() => {
                             // Find the file content from generated files
-                            const file = generationProgress.files.find(f => f.path === selectedFile);
+                            const file = explorerFiles.find(f => f.path === selectedFile);
                             return file?.content || '// File content will appear here';
                           })()}
                         </SyntaxHighlighter>
@@ -1541,7 +1599,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
                     </div>
                   </div>
                 ) : /* If no files parsed yet, show loading or raw stream */
-                generationProgress.files.length === 0 && !generationProgress.currentFile ? (
+                !hasCodeFiles && !generationProgress.currentFile ? (
                   generationProgress.isThinking ? (
                     // Beautiful loading state while thinking
                     <div className="flex items-center justify-center h-full">
@@ -1626,7 +1684,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
                     )}
                     
                     {/* Show completed files */}
-                    {generationProgress.files.map((file, idx) => (
+                    {explorerFiles.map((file, idx) => (
                       <div key={idx} className="bg-white border border-gray-200 rounded-lg overflow-hidden">
                         <div className="px-4 py-2 bg-[#36322F] text-white flex items-center justify-between">
                           <div className="flex items-center gap-2">
@@ -3488,6 +3546,54 @@ Focus on the key sections and content, making it clean and modern.`;
           >
             ← Projects
           </button>
+          {isEditingName ? (
+            <input
+              autoFocus
+              value={nameInputValue}
+              onChange={e => setNameInputValue(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') {
+                  const trimmed = nameInputValue.trim()
+                  if (trimmed) {
+                    setProjectName(trimmed)
+                    if (projectId) {
+                      fetch(`/api/projects/${projectId}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name: trimmed })
+                      }).catch(e => console.error('[project] Failed to rename', e))
+                    }
+                  }
+                  setIsEditingName(false)
+                } else if (e.key === 'Escape') {
+                  setIsEditingName(false)
+                }
+              }}
+              onBlur={() => {
+                const trimmed = nameInputValue.trim()
+                if (trimmed) {
+                  setProjectName(trimmed)
+                  if (projectId) {
+                    fetch(`/api/projects/${projectId}`, {
+                      method: 'PUT',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ name: trimmed })
+                    }).catch(e => console.error('[project] Failed to rename', e))
+                  }
+                }
+                setIsEditingName(false)
+              }}
+              className="text-sm font-medium text-foreground bg-transparent border-b border-primary focus:outline-none w-40"
+            />
+          ) : (
+            <button
+              onClick={() => { setNameInputValue(projectName); setIsEditingName(true) }}
+              className="text-sm font-medium text-foreground hover:text-primary transition-colors"
+              title="Click to rename"
+            >
+              {projectName}
+            </button>
+          )}
           <HeaderBrandKit />
         </div>
         <div className="flex items-center gap-2">
@@ -4097,9 +4203,11 @@ Focus on the key sections and content, making it clean and modern.`;
           </div>
         </div>
 
-        {/* Right Panel - Preview or Generation (2/3 of remaining width) */}
-        <div className="flex-1 flex flex-col overflow-hidden">
-          <div className="px-3 pt-4 pb-4 bg-white border-b border-gray-200 flex justify-between items-center">
+        {/* Right Panel - Preview or Generation (2/3 of remaining width)
+            No overflow-hidden on this column: it clips the sandbox dropdown.
+            Scroll/containment lives on the preview/content region below. */}
+        <div className="flex-1 flex flex-col min-h-0">
+          <div className="px-3 pt-4 pb-4 bg-white border-b border-gray-200 flex justify-between items-center shrink-0 overflow-visible">
             <div className="flex items-center gap-2">
               {/* Toggle-style Code/View switcher */}
               <div className="inline-flex bg-gray-100 border border-gray-200 rounded-md p-0.5">
@@ -4154,9 +4262,68 @@ Focus on the key sections and content, making it clean and modern.`;
               
               {/* Sandbox Status Indicator */}
               {sandboxData && (
-                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-gray-100 border border-gray-200 rounded-md text-xs font-medium text-gray-700">
-                  <div className="w-1.5 h-1.5 bg-green-500 rounded-full" />
-                  Sandbox active
+                <div className="relative">
+                  <button
+                    onClick={() => setShowSandboxController(v => !v)}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-gray-100 border border-gray-200 rounded-md text-xs font-medium text-gray-700 hover:bg-gray-200 transition-colors"
+                  >
+                    <div className="w-1.5 h-1.5 bg-green-500 rounded-full" />
+                    Sandbox active
+                  </button>
+
+                  {showSandboxController && (
+                    <div
+                      ref={sandboxControllerRef}
+                      className="absolute right-0 top-full mt-1 z-50 w-[min(20rem,calc(100vw-1rem))] bg-white border border-gray-200 rounded-lg shadow-lg p-3 flex flex-col gap-2"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Sandbox</span>
+                        <button onClick={() => setShowSandboxController(false)} className="text-gray-400 hover:text-gray-600 text-sm leading-none shrink-0">✕</button>
+                      </div>
+
+                      <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-xs items-start">
+                        <span className="text-gray-400 whitespace-nowrap pt-0.5">ID</span>
+                        <span className="text-gray-700 font-mono break-all min-w-0" title={sandboxData.sandboxId}>{sandboxData.sandboxId}</span>
+
+                        <span className="text-gray-400 whitespace-nowrap pt-0.5">URL</span>
+                        <span className="break-all min-w-0 pt-0.5">
+                          <a href={sandboxData.url} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline" title={sandboxData.url}>{sandboxData.url}</a>
+                        </span>
+
+                        <span className="text-gray-400 whitespace-nowrap pt-0.5">Статус</span>
+                        <span className="flex items-center gap-1 text-green-600 font-medium min-w-0 pt-0.5">
+                          <span className="w-1.5 h-1.5 bg-green-500 rounded-full shrink-0" />
+                          Ажиллаж байна
+                        </span>
+                      </div>
+
+                      <div className="border-t border-gray-100 pt-2 flex flex-col">
+                        <button
+                          onClick={async () => {
+                            setShowSandboxController(false)
+                            await fetch('/api/restart-vite', { method: 'POST' })
+                            setTimeout(() => {
+                              if (iframeRef.current && sandboxData?.url) {
+                                iframeRef.current.src = `${sandboxData.url}?t=${Date.now()}`
+                              }
+                            }, 2000)
+                          }}
+                          className="w-full text-left px-2.5 py-1.5 text-xs rounded hover:bg-gray-100 text-gray-700 transition-colors"
+                        >
+                          ↺ Dev server дахин эхлүүлэх
+                        </button>
+                        <button
+                          onClick={() => {
+                            setShowSandboxController(false)
+                            createSandbox()
+                          }}
+                          className="w-full text-left px-2.5 py-1.5 text-xs rounded hover:bg-gray-100 text-gray-700 transition-colors"
+                        >
+                          + Шинэ sandbox үүсгэх
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
               

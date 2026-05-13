@@ -5,10 +5,233 @@ import { FileManifest, FileInfo, RouteInfo } from '@/types/file-manifest';
 
 declare global {
   var activeSandbox: any;
+  var activeSandboxProvider: any;
 }
 
 export async function GET() {
   try {
+    const MAX_FILE_SIZE_BYTES = 200 * 1024; // keep UI responsive while showing most project files
+
+    if (global.activeSandboxProvider) {
+      console.log('[get-sandbox-files] Fetching files via activeSandboxProvider...');
+      const provider = global.activeSandboxProvider;
+      const normalizeProjectPath = (filePath: string): string => {
+        const trimmedPath = filePath.replace(/^\.\//, '').replace(/^\/+/, '');
+        const workspaceMarker = '/workspace/';
+        const workspaceIdx = filePath.lastIndexOf(workspaceMarker);
+        if (workspaceIdx !== -1) {
+          const relativeFromWorkspace = filePath.slice(workspaceIdx + workspaceMarker.length).replace(/^\/+/, '');
+          if (relativeFromWorkspace) return relativeFromWorkspace;
+        }
+        const workspaceRelativeMarker = 'workspace/';
+        const workspaceRelativeIdx = trimmedPath.indexOf(workspaceRelativeMarker);
+        if (workspaceRelativeIdx !== -1) {
+          const relativeFromWorkspace = trimmedPath.slice(workspaceRelativeIdx + workspaceRelativeMarker.length).replace(/^\/+/, '');
+          if (relativeFromWorkspace) return relativeFromWorkspace;
+        }
+
+        const roots = [
+          'src/',
+          'public/',
+          'app/',
+          'index.html',
+          'package.json',
+          'package-lock.json',
+          'tsconfig.json',
+          'vite.config.ts',
+          'vite.config.js',
+          'README.md',
+        ];
+
+        for (const root of roots) {
+          const idx = trimmedPath.indexOf(root);
+          if (idx !== -1) return trimmedPath.slice(idx);
+        }
+
+        if (trimmedPath.startsWith('sessions/')) {
+          const parts = trimmedPath.split('/');
+          if (parts.length > 2) {
+            return parts.slice(2).join('/');
+          }
+        }
+
+        return trimmedPath;
+      };
+      const getReadCandidates = (originalPath: string, normalizedPath: string): string[] => {
+        const candidates = new Set<string>();
+        const add = (value?: string) => {
+          if (!value) return;
+          const v = value.trim();
+          if (v) candidates.add(v);
+        };
+
+        add(originalPath);
+        add(normalizedPath);
+        add(`./${normalizedPath}`);
+        add(`/app/${normalizedPath}`);
+        add(`workspace/${normalizedPath}`);
+        add(`/workspace/${normalizedPath}`);
+
+        const trimmedOriginal = originalPath.replace(/^\.\//, '').replace(/^\/+/, '');
+        const parts = trimmedOriginal.split('/').filter(Boolean);
+        if (parts[0] === 'sessions' && parts[1]) {
+          const sessionRoot = `sessions/${parts[1]}`;
+          add(`${sessionRoot}/${normalizedPath}`);
+          add(`./${sessionRoot}/${normalizedPath}`);
+          add(`${sessionRoot}/workspace/${normalizedPath}`);
+          add(`./${sessionRoot}/workspace/${normalizedPath}`);
+        }
+
+        return Array.from(candidates);
+      };
+
+      const treeApiBaseUrl = process.env.MINU_SANDBOX_URL || 'http://localhost:8080';
+      const sandboxId = provider?.getSandboxInfo?.()?.sandboxId;
+      const flattenTreePaths = (node: any): string[] => {
+        if (!node) return [];
+        if (Array.isArray(node)) {
+          return node.flatMap(item => flattenTreePaths(item));
+        }
+        const collected: string[] = [];
+        if (typeof node.path === 'string' && node.path.trim()) {
+          collected.push(node.path);
+        }
+        if (Array.isArray(node.children)) {
+          collected.push(...node.children.flatMap((child: any) => flattenTreePaths(child)));
+        }
+        return collected;
+      };
+
+      let allFiles: string[] = [];
+      if (sandboxId) {
+        try {
+          const treeRes = await fetch(`${treeApiBaseUrl}/tree/${sandboxId}`);
+          if (treeRes.ok) {
+            const treeData = await treeRes.json();
+            allFiles = flattenTreePaths(treeData.files ?? treeData.tree ?? treeData);
+            console.log('[get-sandbox-files] Tree endpoint returned paths:', allFiles.length);
+          } else {
+            console.warn('[get-sandbox-files] Tree endpoint failed, falling back to listFiles:', treeRes.status);
+          }
+        } catch (treeError) {
+          console.warn('[get-sandbox-files] Tree endpoint error, falling back to listFiles:', treeError);
+        }
+      }
+
+      if (allFiles.length === 0) {
+        allFiles = await provider.listFiles();
+      }
+      const fileList = allFiles.filter((filePath: string) => {
+        const normalizedPath = normalizeProjectPath(filePath);
+        if (!normalizedPath) return false;
+        if (normalizedPath.includes('node_modules/')) {
+          return false;
+        }
+        return !normalizedPath.endsWith('/');
+      });
+
+      const filesContent: Record<string, string> = {};
+      for (const filePath of fileList) {
+        const normalizedPath = normalizeProjectPath(filePath);
+        try {
+          const candidates = getReadCandidates(filePath, normalizedPath);
+          let content: string | null = null;
+          let readOk = false;
+
+          for (const candidatePath of candidates) {
+            try {
+              content = await provider.readFile(candidatePath);
+              readOk = true;
+              break;
+            } catch {
+              // Try next candidate path
+            }
+          }
+
+          if (readOk && typeof content === 'string' && content.length <= MAX_FILE_SIZE_BYTES) {
+            filesContent[normalizedPath] = content;
+          } else if (readOk) {
+            console.debug('[get-sandbox-files] Skipping large file:', { normalizedPath, size: content?.length });
+          } else if (!readOk) {
+            console.debug('[get-sandbox-files] Failed to read with all candidates:', { filePath, normalizedPath, candidates });
+          }
+        } catch (readError) {
+          console.debug('[get-sandbox-files] Error reading file:', filePath, readError);
+        }
+      }
+
+      const dirs = new Set<string>(['.']);
+      for (const filePath of Object.keys(filesContent)) {
+        const parts = filePath.split('/').filter(Boolean);
+        let current = '';
+        for (let i = 0; i < parts.length - 1; i += 1) {
+          current = current ? `${current}/${parts[i]}` : parts[i];
+          dirs.add(`./${current}`);
+        }
+      }
+      const structure = Array.from(dirs).sort().slice(0, 50).join('\n');
+
+      const fileManifest: FileManifest = {
+        files: {},
+        routes: [],
+        componentTree: {},
+        entryPoint: '',
+        styleFiles: [],
+        timestamp: Date.now(),
+      };
+
+      for (const [relativePath, content] of Object.entries(filesContent)) {
+        const fullPath = `/${relativePath}`;
+        const fileInfo: FileInfo = {
+          content,
+          type: 'utility',
+          path: fullPath,
+          relativePath,
+          lastModified: Date.now(),
+        };
+
+        if (relativePath.match(/\.(jsx?|tsx?)$/)) {
+          const parseResult = parseJavaScriptFile(content, fullPath);
+          Object.assign(fileInfo, parseResult);
+
+          if (
+            relativePath === 'src/main.jsx' ||
+            relativePath === 'src/main.tsx' ||
+            relativePath === 'src/index.jsx' ||
+            relativePath === 'src/index.tsx'
+          ) {
+            fileManifest.entryPoint = fullPath;
+          }
+
+          if (relativePath === 'src/App.jsx' || relativePath === 'src/App.tsx' || relativePath === 'App.jsx' || relativePath === 'App.tsx') {
+            fileManifest.entryPoint = fileManifest.entryPoint || fullPath;
+          }
+        }
+
+        if (relativePath.endsWith('.css')) {
+          fileManifest.styleFiles.push(fullPath);
+          fileInfo.type = 'style';
+        }
+
+        fileManifest.files[fullPath] = fileInfo;
+      }
+
+      fileManifest.componentTree = buildComponentTree(fileManifest.files);
+      fileManifest.routes = extractRoutes(fileManifest.files);
+
+      if (global.sandboxState?.fileCache) {
+        global.sandboxState.fileCache.manifest = fileManifest;
+      }
+
+      return NextResponse.json({
+        success: true,
+        files: filesContent,
+        structure,
+        fileCount: Object.keys(filesContent).length,
+        manifest: fileManifest,
+      });
+    }
+
     if (!global.activeSandbox) {
       return NextResponse.json({
         success: false,
@@ -24,18 +247,7 @@ export async function GET() {
       args: [
         '.',
         '-name', 'node_modules', '-prune', '-o',
-        '-name', '.git', '-prune', '-o',
-        '-name', 'dist', '-prune', '-o',
-        '-name', 'build', '-prune', '-o',
         '-type', 'f',
-        '(',
-        '-name', '*.jsx',
-        '-o', '-name', '*.js',
-        '-o', '-name', '*.tsx',
-        '-o', '-name', '*.ts',
-        '-o', '-name', '*.css',
-        '-o', '-name', '*.json',
-        ')',
         '-print'
       ]
     });
@@ -61,8 +273,8 @@ export async function GET() {
         if (statResult.exitCode === 0) {
           const fileSize = parseInt(await statResult.stdout());
           
-          // Only read files smaller than 10KB
-          if (fileSize < 10000) {
+          // Keep file preview reasonably sized for the UI panel
+          if (fileSize <= MAX_FILE_SIZE_BYTES) {
             const catResult = await global.activeSandbox.runCommand({
               cmd: 'cat',
               args: [filePath]
