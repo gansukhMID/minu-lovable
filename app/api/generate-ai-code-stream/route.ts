@@ -86,6 +86,8 @@ function analyzeUserPreferences(messages: ConversationMessage[]): {
 declare global {
   var sandboxState: SandboxState;
   var conversationState: ConversationState | null;
+  var activeSandbox: any;
+  var activeSandboxProvider: any;
 }
 
 export async function POST(request: NextRequest) {
@@ -927,8 +929,8 @@ CRITICAL: When files are provided in the context:
 4. Do NOT ask to see files - they are already provided in the context above
 5. Make the requested change immediately`;
 
-        // If Morph Fast Apply is enabled (edit mode + MORPH_API_KEY), force <edit> block output
-        const morphFastApplyEnabled = Boolean(isEdit && process.env.MORPH_API_KEY);
+        // Morph Fast Apply is disabled; always prefer full <file> outputs.
+        const morphFastApplyEnabled = false;
         if (morphFastApplyEnabled) {
           systemPrompt += `
 
@@ -969,7 +971,7 @@ MORPH FAST APPLY MODE (EDIT-ONLY):
           console.log('[generate-ai-code-stream] - Has manifest:', !!global.sandboxState?.fileCache?.manifest);
           
           // If no backend files and we're in edit mode, try to fetch from sandbox
-          if (!hasBackendFiles && isEdit && (global.activeSandbox || context?.sandboxId)) {
+          if (!hasBackendFiles && (global.activeSandboxProvider || global.activeSandbox || context?.sandboxId)) {
             console.log('[generate-ai-code-stream] No backend files, attempting to fetch from sandbox...');
             
             try {

@@ -280,12 +280,11 @@ export async function POST(request: NextRequest) {
 
     // Parse the AI response
     const parsed = parseAIResponse(response);
-    const morphEnabled = Boolean(isEdit && process.env.MORPH_API_KEY);
-    const morphEdits = morphEnabled ? parseMorphEdits(response) : [];
+    // Morph API is intentionally disabled; we parse <edit> blocks for direct file-write fallback.
+    const morphEnabled = false;
+    const morphEdits = parseMorphEdits(response);
     console.log('[apply-ai-code-stream] Morph Fast Apply mode:', morphEnabled);
-    if (morphEnabled) {
-      console.log('[apply-ai-code-stream] Morph edits found:', morphEdits.length);
-    }
+    console.log('[apply-ai-code-stream] Morph edits found:', morphEdits.length);
     
     // Log what was parsed
     console.log('[apply-ai-code-stream] Parsed result:');
@@ -533,8 +532,22 @@ export async function POST(request: NextRequest) {
           return !configFiles.includes(fileName);
         });
 
+        if (morphEdits.length > 0 && filteredFiles.length === 0) {
+          filteredFiles = morphEdits
+            .filter(edit => typeof edit.update === 'string' && edit.update.trim().length > 0)
+            .map(edit => ({
+              path: edit.targetFile,
+              content: edit.update
+            }));
+          await sendProgress({
+            type: 'warning',
+            message: `Using direct file-write fallback for ${filteredFiles.length} <edit> block(s).`
+          });
+        }
+
         // If Morph is enabled and we have edits, apply them before file writes
         const morphUpdatedPaths = new Set<string>();
+        const morphFailedEdits: Array<{ targetFile: string; updateSnippet: string; error: string }> = [];
         if (morphEnabled && morphEdits.length > 0) {
           const morphSandbox = (global as any).activeSandbox || providerInstance;
           if (!morphSandbox) {
@@ -561,14 +574,44 @@ export async function POST(request: NextRequest) {
                   console.error('[apply-ai-code-stream] Morph apply failed for', edit.targetFile, msg);
                   if (results.errors) results.errors.push(`Morph apply failed for ${edit.targetFile}: ${msg}`);
                   await sendProgress({ type: 'file-error', fileName: edit.targetFile, error: msg });
+                  morphFailedEdits.push({
+                    targetFile: edit.targetFile,
+                    updateSnippet: edit.update,
+                    error: msg
+                  });
                 }
               } catch (err) {
                 const msg = (err as Error).message;
                 console.error('[apply-ai-code-stream] Morph apply exception for', edit.targetFile, msg);
                 if (results.errors) results.errors.push(`Morph apply exception for ${edit.targetFile}: ${msg}`);
                 await sendProgress({ type: 'file-error', fileName: edit.targetFile, error: msg });
+                morphFailedEdits.push({
+                  targetFile: edit.targetFile,
+                  updateSnippet: edit.update,
+                  error: msg
+                });
               }
             }
+          }
+        }
+
+        // Fallback path: if Morph produced edits but failed to apply and there are no <file> blocks,
+        // treat <update> as the full file content and continue through normal write flow.
+        if (morphFailedEdits.length > 0 && filteredFiles.length === 0) {
+          const fallbackFiles = morphFailedEdits
+            .filter(edit => typeof edit.updateSnippet === 'string' && edit.updateSnippet.trim().length > 0)
+            .map(edit => ({
+              path: edit.targetFile,
+              content: edit.updateSnippet
+            }));
+
+          if (fallbackFiles.length > 0) {
+            filteredFiles = fallbackFiles;
+            await sendProgress({
+              type: 'warning',
+              message: `Morph failed for ${morphFailedEdits.length} edit(s). Falling back to direct file write.`
+            });
+            console.warn('[apply-ai-code-stream] Using direct write fallback for Morph edits:', fallbackFiles.map(f => f.path));
           }
         }
 

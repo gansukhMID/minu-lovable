@@ -11,6 +11,45 @@ declare global {
 export async function GET() {
   try {
     const MAX_FILE_SIZE_BYTES = 200 * 1024; // keep UI responsive while showing most project files
+    const updateGlobalFileCache = (
+      filesContent: Record<string, string>,
+      manifest: FileManifest,
+      sandboxId: string | undefined
+    ) => {
+      if (!global.sandboxState) {
+        global.sandboxState = {
+          fileCache: {
+            files: {},
+            lastSync: Date.now(),
+            sandboxId: sandboxId || 'unknown',
+            manifest
+          }
+        } as any;
+      } else if (!global.sandboxState.fileCache) {
+        global.sandboxState.fileCache = {
+          files: {},
+          lastSync: Date.now(),
+          sandboxId: sandboxId || 'unknown',
+          manifest
+        } as any;
+      }
+
+      if (global.sandboxState.fileCache) {
+        const cachedFiles: Record<string, { content: string; lastModified: number }> = {};
+        for (const [path, content] of Object.entries(filesContent)) {
+          cachedFiles[path] = {
+            content,
+            lastModified: Date.now(),
+          };
+        }
+        global.sandboxState.fileCache.files = cachedFiles;
+        global.sandboxState.fileCache.manifest = manifest;
+        global.sandboxState.fileCache.lastSync = Date.now();
+        if (sandboxId) {
+          global.sandboxState.fileCache.sandboxId = sandboxId;
+        }
+      }
+    };
 
     if (global.activeSandboxProvider) {
       console.log('[get-sandbox-files] Fetching files via activeSandboxProvider...');
@@ -219,9 +258,7 @@ export async function GET() {
       fileManifest.componentTree = buildComponentTree(fileManifest.files);
       fileManifest.routes = extractRoutes(fileManifest.files);
 
-      if (global.sandboxState?.fileCache) {
-        global.sandboxState.fileCache.manifest = fileManifest;
-      }
+      updateGlobalFileCache(filesContent, fileManifest, sandboxId);
 
       return NextResponse.json({
         success: true,
@@ -362,9 +399,11 @@ export async function GET() {
     fileManifest.routes = extractRoutes(fileManifest.files);
     
     // Update global file cache with manifest
-    if (global.sandboxState?.fileCache) {
-      global.sandboxState.fileCache.manifest = fileManifest;
-    }
+    updateGlobalFileCache(
+      filesContent,
+      fileManifest,
+      global.sandboxState?.fileCache?.sandboxId || global.sandboxData?.sandboxId
+    );
 
     return NextResponse.json({
       success: true,

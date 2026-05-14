@@ -2010,8 +2010,12 @@ Tip: I automatically detect and install npm packages from your code imports (lik
       });
     }
     
-    // Determine if this is an edit
-    const isEdit = conversationContext.appliedCode.length > 0;
+    // Determine edit mode from real project state, not only in-memory chat session
+    const hasSandboxFiles = Object.keys(sandboxFiles).length > 0;
+    const hasAppliedFilesInChat = chatMessages.some(
+      msg => Array.isArray(msg.metadata?.appliedFiles) && msg.metadata.appliedFiles.length > 0
+    );
+    const isEdit = conversationContext.appliedCode.length > 0 || hasSandboxFiles || hasAppliedFilesInChat;
     
     try {
       // Generation tab is already active from scraping phase
@@ -2042,6 +2046,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
         structure: structureContent,
         recentMessages: chatMessages.slice(-20),
         conversationContext: conversationContext,
+        currentFiles: sandboxFiles,
         currentCode: promptInput,
         sandboxUrl: sandboxData?.url,
         sandboxCreating: sandboxCreating
@@ -2050,7 +2055,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
       // Debug what we're sending
       console.log('[chat] Sending context to AI:');
       console.log('[chat] - sandboxId:', fullContext.sandboxId);
-      console.log('[chat] - isEdit:', conversationContext.appliedCode.length > 0);
+      console.log('[chat] - isEdit:', isEdit);
       
       const response = await fetch('/api/generate-ai-code-stream', {
         method: 'POST',
@@ -2059,7 +2064,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
           prompt: message,
           model: aiModel,
           context: fullContext,
-          isEdit: conversationContext.appliedCode.length > 0
+          isEdit
         })
       });
       
@@ -2466,7 +2471,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
     }
     
     addChatMessage('Re-applying last generation...', 'system');
-    const isEdit = conversationContext.appliedCode.length > 0;
+    const isEdit = conversationContext.appliedCode.length > 0 || Object.keys(sandboxFiles).length > 0;
     await applyGeneratedCode(conversationContext.lastGeneratedCode, isEdit);
   };
 
