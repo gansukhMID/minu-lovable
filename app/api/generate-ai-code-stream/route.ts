@@ -929,24 +929,6 @@ CRITICAL: When files are provided in the context:
 4. Do NOT ask to see files - they are already provided in the context above
 5. Make the requested change immediately`;
 
-        // Morph Fast Apply is disabled; always prefer full <file> outputs.
-        const morphFastApplyEnabled = false;
-        if (morphFastApplyEnabled) {
-          systemPrompt += `
-
-MORPH FAST APPLY MODE (EDIT-ONLY):
-- Output edits as <edit> blocks, not full <file> blocks, for files that already exist.
-- Format for each edit:
-  <edit target_file="src/components/Header.jsx">
-    <instructions>Describe the minimal change, single sentence.</instructions>
-    <update>Provide the SMALLEST code snippet necessary to perform the change.</update>
-  </edit>
-- Only use <file> blocks when you must CREATE a brand-new file.
-- Prefer ONE edit block for a simple change; multiple edits only if absolutely needed for separate files.
-- Keep updates minimal and precise; do not rewrite entire files.
-`;
-        }
-
         // Build full prompt with context
         let fullPrompt = prompt;
         if (context) {
@@ -1192,17 +1174,6 @@ MORPH FAST APPLY MODE (EDIT-ONLY):
           }
           
           if (contextParts.length > 0) {
-            if (morphFastApplyEnabled) {
-              contextParts.push('\nOUTPUT FORMAT (REQUIRED IN MORPH MODE):');
-              contextParts.push('<edit target_file="src/components/Component.jsx">');
-              contextParts.push('<instructions>Minimal, precise instruction.</instructions>');
-              contextParts.push('<update>// Smallest necessary snippet</update>');
-              contextParts.push('</edit>');
-              contextParts.push('\nIf you need to create a NEW file, then and only then output a full file:');
-              contextParts.push('<file path="src/components/NewComponent.jsx">');
-              contextParts.push('// Full file content when creating new files');
-              contextParts.push('</file>');
-            }
             fullPrompt = `CONTEXT:\n${contextParts.join('\n')}\n\nUSER REQUEST:\n${prompt}`;
           }
         }

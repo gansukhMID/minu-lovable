@@ -30,11 +30,6 @@ OPENAI_API_KEY=your_openai_api_key        # https://platform.openai.com
 GROQ_API_KEY=your_groq_api_key            # https://console.groq.com
 
 # =================================================================
-# FAST APPLY (Optional - for faster edits)
-# =================================================================
-MORPH_API_KEY=your_morphllm_api_key    # https://morphllm.com/dashboard
-
-# =================================================================
 # SANDBOX PROVIDER - Choose ONE: Vercel (default) or E2B
 # =================================================================
 SANDBOX_PROVIDER=vercel  # or 'e2b'

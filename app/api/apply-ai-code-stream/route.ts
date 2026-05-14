@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { parseMorphEdits, applyMorphEditToFile } from '@/lib/morph-fast-apply';
+import { parseEditBlocks } from '@/lib/parse-edit-blocks';
 // Sandbox import not needed - using global sandbox from sandbox-manager
 import type { SandboxState } from '@/types/sandbox';
 import type { ConversationState } from '@/types/conversation';
@@ -280,11 +280,8 @@ export async function POST(request: NextRequest) {
 
     // Parse the AI response
     const parsed = parseAIResponse(response);
-    // Morph API is intentionally disabled; we parse <edit> blocks for direct file-write fallback.
-    const morphEnabled = false;
-    const morphEdits = parseMorphEdits(response);
-    console.log('[apply-ai-code-stream] Morph Fast Apply mode:', morphEnabled);
-    console.log('[apply-ai-code-stream] Morph edits found:', morphEdits.length);
+    const editBlocks = parseEditBlocks(response);
+    console.log('[apply-ai-code-stream] Parsed <edit> blocks:', editBlocks.length);
     
     // Log what was parsed
     console.log('[apply-ai-code-stream] Parsed result:');
@@ -414,15 +411,6 @@ export async function POST(request: NextRequest) {
           message: 'Starting code application...',
           totalSteps: 3
         });
-        if (morphEnabled) {
-          await sendProgress({ type: 'info', message: 'Morph Fast Apply enabled' });
-          await sendProgress({ type: 'info', message: `Parsed ${morphEdits.length} Morph edits` });
-          if (morphEdits.length === 0) {
-            console.warn('[apply-ai-code-stream] Morph enabled but no <edit> blocks found; falling back to full-file flow');
-            await sendProgress({ type: 'warning', message: 'Morph enabled but no <edit> blocks found; falling back to full-file flow' });
-          }
-        }
-        
         // Step 1: Install packages
         const packagesArray = Array.isArray(packages) ? packages : [];
         const parsedPackages = Array.isArray(parsed.packages) ? parsed.packages : [];
@@ -532,8 +520,8 @@ export async function POST(request: NextRequest) {
           return !configFiles.includes(fileName);
         });
 
-        if (morphEdits.length > 0 && filteredFiles.length === 0) {
-          filteredFiles = morphEdits
+        if (editBlocks.length > 0 && filteredFiles.length === 0) {
+          filteredFiles = editBlocks
             .filter(edit => typeof edit.update === 'string' && edit.update.trim().length > 0)
             .map(edit => ({
               path: edit.targetFile,
@@ -545,91 +533,6 @@ export async function POST(request: NextRequest) {
           });
         }
 
-        // If Morph is enabled and we have edits, apply them before file writes
-        const morphUpdatedPaths = new Set<string>();
-        const morphFailedEdits: Array<{ targetFile: string; updateSnippet: string; error: string }> = [];
-        if (morphEnabled && morphEdits.length > 0) {
-          const morphSandbox = (global as any).activeSandbox || providerInstance;
-          if (!morphSandbox) {
-            console.warn('[apply-ai-code-stream] No sandbox available to apply Morph edits');
-            await sendProgress({ type: 'warning', message: 'No sandbox available to apply Morph edits' });
-          } else {
-            await sendProgress({ type: 'info', message: `Applying ${morphEdits.length} fast edits via Morph...` });
-            for (const [idx, edit] of morphEdits.entries()) {
-              try {
-                await sendProgress({ type: 'file-progress', current: idx + 1, total: morphEdits.length, fileName: edit.targetFile, action: 'morph-applying' });
-                const result = await applyMorphEditToFile({
-                  sandbox: morphSandbox,
-                  targetPath: edit.targetFile,
-                  instructions: edit.instructions,
-                  updateSnippet: edit.update
-                });
-                if (result.success && result.normalizedPath) {
-                  console.log('[apply-ai-code-stream] Morph updated', result.normalizedPath);
-                  morphUpdatedPaths.add(result.normalizedPath);
-                  if (results.filesUpdated) results.filesUpdated.push(result.normalizedPath);
-                  await sendProgress({ type: 'file-complete', fileName: result.normalizedPath, action: 'morph-updated' });
-                } else {
-                  const msg = result.error || 'Unknown Morph error';
-                  console.error('[apply-ai-code-stream] Morph apply failed for', edit.targetFile, msg);
-                  if (results.errors) results.errors.push(`Morph apply failed for ${edit.targetFile}: ${msg}`);
-                  await sendProgress({ type: 'file-error', fileName: edit.targetFile, error: msg });
-                  morphFailedEdits.push({
-                    targetFile: edit.targetFile,
-                    updateSnippet: edit.update,
-                    error: msg
-                  });
-                }
-              } catch (err) {
-                const msg = (err as Error).message;
-                console.error('[apply-ai-code-stream] Morph apply exception for', edit.targetFile, msg);
-                if (results.errors) results.errors.push(`Morph apply exception for ${edit.targetFile}: ${msg}`);
-                await sendProgress({ type: 'file-error', fileName: edit.targetFile, error: msg });
-                morphFailedEdits.push({
-                  targetFile: edit.targetFile,
-                  updateSnippet: edit.update,
-                  error: msg
-                });
-              }
-            }
-          }
-        }
-
-        // Fallback path: if Morph produced edits but failed to apply and there are no <file> blocks,
-        // treat <update> as the full file content and continue through normal write flow.
-        if (morphFailedEdits.length > 0 && filteredFiles.length === 0) {
-          const fallbackFiles = morphFailedEdits
-            .filter(edit => typeof edit.updateSnippet === 'string' && edit.updateSnippet.trim().length > 0)
-            .map(edit => ({
-              path: edit.targetFile,
-              content: edit.updateSnippet
-            }));
-
-          if (fallbackFiles.length > 0) {
-            filteredFiles = fallbackFiles;
-            await sendProgress({
-              type: 'warning',
-              message: `Morph failed for ${morphFailedEdits.length} edit(s). Falling back to direct file write.`
-            });
-            console.warn('[apply-ai-code-stream] Using direct write fallback for Morph edits:', fallbackFiles.map(f => f.path));
-          }
-        }
-
-        // Avoid overwriting Morph-updated files in the file write loop
-        if (morphUpdatedPaths.size > 0) {
-          filteredFiles = filteredFiles.filter(file => {
-            if (!file?.path) return true;
-            let normalizedPath = file.path.startsWith('/') ? file.path.slice(1) : file.path;
-            const fileName = normalizedPath.split('/').pop() || '';
-            if (!normalizedPath.startsWith('src/') &&
-                !normalizedPath.startsWith('public/') &&
-                normalizedPath !== 'index.html' &&
-                !configFiles.includes(fileName)) {
-              normalizedPath = 'src/' + normalizedPath;
-            }
-            return !morphUpdatedPaths.has(normalizedPath);
-          });
-        }
         
         for (const [index, file] of filteredFiles.entries()) {
           try {

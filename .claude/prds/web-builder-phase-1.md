@@ -164,7 +164,7 @@ The platform needs to shift from "generate anything" to "assemble pre-built modu
 - Real QR payment bank API integration (stubs only)
 - Deploy manager (`apps/builder/deploy-manager/`)
 - Preview tool sandbox isolation
-- `extract-brand-styles`, `morph-fast-apply`, or any other existing API routes not listed above
+- `extract-brand-styles`, or any other existing API routes not listed above
 
 ---
 
