@@ -174,24 +174,20 @@ export async function POST(request: NextRequest) {
     // Verify sandbox is ready before applying code
     console.log('[apply-ai-code] Verifying sandbox is ready...');
     
-    // For Vercel sandboxes, check if Vite is running
-    if (sandbox.constructor?.name === 'VercelProvider' || sandbox.getSandboxInfo?.()?.provider === 'vercel') {
-      console.log('[apply-ai-code] Detected Vercel sandbox, checking Vite status...');
+    // Prefer provider API; fallback to legacy direct sandbox filesystem if present.
+    if (typeof sandbox.runCommand === 'function') {
+      console.log('[apply-ai-code] Checking Vite dev server...');
       try {
-        // Check if Vite process is running
-        const checkResult = await sandbox.runCommand('pgrep -f vite');
-        if (!checkResult || !checkResult.stdout) {
-          console.log('[apply-ai-code] Vite not running, starting it...');
-          // Start Vite if not running
-          await sandbox.runCommand('sh -c "cd /vercel/sandbox && nohup npm run dev > /tmp/vite.log 2>&1 &"');
-          // Wait for Vite to start
+        const checkResult = await sandbox.runCommand('pgrep -f vite || true');
+        if (!checkResult?.stdout?.trim()) {
+          console.log('[apply-ai-code] Vite not running, starting dev server...');
+          await sandbox.runCommand('nohup npm run dev > /tmp/vite.log 2>&1 &');
           await new Promise(resolve => setTimeout(resolve, 5000));
-          console.log('[apply-ai-code] Vite started, proceeding with code application');
         } else {
           console.log('[apply-ai-code] Vite is already running');
         }
       } catch (e) {
-        console.log('[apply-ai-code] Could not check Vite status, proceeding anyway:', e);
+        console.log('[apply-ai-code] Could not verify Vite, proceeding:', e);
       }
     }
     
@@ -373,15 +369,13 @@ export async function POST(request: NextRequest) {
           fileContent = fileContent.replace(/shadow-5xl/g, 'shadow-2xl');
         }
         
-        console.log(`[apply-ai-code] Writing file using E2B files API: ${fullPath}`);
+        console.log(`[apply-ai-code] Writing sandbox file (normalized path hint): ${fullPath}`);
         
         try {
           // Check if we're using provider pattern (v2) or direct sandbox (v1)
           if (sandbox.writeFile) {
-            // V2: Provider pattern (Vercel/E2B provider)
             await sandbox.writeFile(file.path, fileContent);
           } else if (sandbox.files?.write) {
-            // V1: Direct E2B sandbox
             await sandbox.files.write(fullPath, fileContent);
           } else {
             throw new Error('Unsupported sandbox type');
@@ -398,7 +392,7 @@ export async function POST(request: NextRequest) {
           }
           
         } catch (writeError) {
-          console.error(`[apply-ai-code] E2B file write error:`, writeError);
+          console.error(`[apply-ai-code] Sandbox file write error:`, writeError);
           throw writeError as Error;
         }
         

@@ -4,10 +4,13 @@ export interface SandboxFile {
   lastModified?: number;
 }
 
+/** Provider id string; extend when adding new SandboxFactory cases. */
+export type SandboxProviderId = string;
+
 export interface SandboxInfo {
   sandboxId: string;
   url: string;
-  provider: 'e2b' | 'vercel' | 'minu';
+  provider: SandboxProviderId;
   createdAt: Date;
 }
 
@@ -18,18 +21,9 @@ export interface CommandResult {
   success: boolean;
 }
 
+/** Per-provider knobs; extend this when you add providers that need typed config. */
 export interface SandboxProviderConfig {
-  e2b?: {
-    apiKey: string;
-    timeoutMs?: number;
-    template?: string;
-  };
-  vercel?: {
-    teamId?: string;
-    projectId?: string;
-    token?: string;
-    authMethod?: 'oidc' | 'pat';
-  };
+  [key: string]: unknown;
 }
 
 export abstract class SandboxProvider {
@@ -51,15 +45,12 @@ export abstract class SandboxProvider {
   abstract getSandboxInfo(): SandboxInfo | null;
   abstract terminate(): Promise<void>;
   abstract isAlive(): boolean;
-  
-  // Optional methods that providers can override
+
   async setupViteApp(): Promise<void> {
-    // Default implementation for setting up a Vite React app
     throw new Error('setupViteApp not implemented for this provider');
   }
-  
+
   async restartViteServer(): Promise<void> {
-    // Default implementation for restarting Vite
     throw new Error('restartViteServer not implemented for this provider');
   }
 }

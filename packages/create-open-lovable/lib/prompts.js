@@ -23,20 +23,15 @@ export function getPrompts(config) {
     prompts.push({
       type: 'list',
       name: 'sandbox',
-      message: 'Choose your sandbox provider:',
+      message: 'Sandbox provider (register more in lib/sandbox/factory.ts):',
       choices: [
         {
-          name: 'E2B - Full-featured development sandboxes',
-          value: 'e2b',
-          short: 'E2B'
-        },
-        {
-          name: 'Vercel - Lightweight ephemeral VMs',
-          value: 'vercel',
-          short: 'Vercel'
+          name: 'Minu — custom HTTP sandbox backend',
+          value: 'minu',
+          short: 'Minu'
         }
       ],
-      default: 'e2b'
+      default: 'minu'
     });
   }
 
@@ -53,7 +48,6 @@ export function getPrompts(config) {
 export function getEnvPrompts(provider) {
   const prompts = [];
 
-  // Always include Firecrawl API key
   prompts.push({
     type: 'input',
     name: 'firecrawlApiKey',
@@ -66,78 +60,21 @@ export function getEnvPrompts(provider) {
     }
   });
 
-  if (provider === 'e2b') {
+  if (provider === 'minu') {
     prompts.push({
       type: 'input',
-      name: 'e2bApiKey',
-      message: 'E2B API key:',
-      validate: (input) => {
-        if (!input || input.trim() === '') {
-          return 'E2B API key is required';
-        }
-        return true;
-      }
+      name: 'minuSandboxUrl',
+      message: 'Minu sandbox API base URL:',
+      default: 'http://192.168.110.93:8080'
     });
-  } else if (provider === 'vercel') {
-    prompts.push({
-      type: 'list',
-      name: 'vercelAuthMethod',
-      message: 'Vercel authentication method:',
-      choices: [
-        {
-          name: 'OIDC Token (automatic in Vercel environment)',
-          value: 'oidc',
-          short: 'OIDC'
-        },
-        {
-          name: 'Personal Access Token',
-          value: 'pat',
-          short: 'PAT'
-        }
-      ]
-    });
-
     prompts.push({
       type: 'input',
-      name: 'vercelTeamId',
-      message: 'Vercel Team ID:',
-      when: (answers) => answers.vercelAuthMethod === 'pat',
-      validate: (input) => {
-        if (!input || input.trim() === '') {
-          return 'Team ID is required for PAT authentication';
-        }
-        return true;
-      }
-    });
-
-    prompts.push({
-      type: 'input',
-      name: 'vercelProjectId',
-      message: 'Vercel Project ID:',
-      when: (answers) => answers.vercelAuthMethod === 'pat',
-      validate: (input) => {
-        if (!input || input.trim() === '') {
-          return 'Project ID is required for PAT authentication';
-        }
-        return true;
-      }
-    });
-
-    prompts.push({
-      type: 'input',
-      name: 'vercelToken',
-      message: 'Vercel Access Token:',
-      when: (answers) => answers.vercelAuthMethod === 'pat',
-      validate: (input) => {
-        if (!input || input.trim() === '') {
-          return 'Access token is required for PAT authentication';
-        }
-        return true;
-      }
+      name: 'minuSandboxHost',
+      message: 'Minu preview hostname (used in iframe URL):',
+      default: '192.168.110.93'
     });
   }
 
-  // Optional AI provider keys
   prompts.push({
     type: 'confirm',
     name: 'addAiKeys',

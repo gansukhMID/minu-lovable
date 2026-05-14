@@ -146,19 +146,10 @@ async function createEnvFile(projectPath, sandbox, answers) {
   envContent += `# REQUIRED - Web scraping for cloning websites\n`;
   envContent += `FIRECRAWL_API_KEY=${answers.firecrawlApiKey || 'your_firecrawl_api_key_here'}\n\n`;
   
-  if (sandbox === 'e2b') {
-    envContent += `# REQUIRED - E2B Sandboxes\n`;
-    envContent += `E2B_API_KEY=${answers.e2bApiKey || 'your_e2b_api_key_here'}\n\n`;
-  } else if (sandbox === 'vercel') {
-    envContent += `# REQUIRED - Vercel Sandboxes\n`;
-    if (answers.vercelAuthMethod === 'oidc') {
-      envContent += `# Using OIDC authentication (automatic in Vercel environment)\n`;
-    } else {
-      envContent += `VERCEL_TEAM_ID=${answers.vercelTeamId || 'your_team_id'}\n`;
-      envContent += `VERCEL_PROJECT_ID=${answers.vercelProjectId || 'your_project_id'}\n`;
-      envContent += `VERCEL_TOKEN=${answers.vercelToken || 'your_access_token'}\n`;
-    }
-    envContent += '\n';
+  if (sandbox === 'minu') {
+    envContent += `# Minu sandbox service\n`;
+    envContent += `MINU_SANDBOX_URL=${answers.minuSandboxUrl || 'http://192.168.110.93:8080'}\n`;
+    envContent += `MINU_SANDBOX_HOST=${answers.minuSandboxHost || '192.168.110.93'}\n\n`;
   }
   
   // Optional AI provider keys
@@ -202,17 +193,10 @@ async function createEnvExample(projectPath, sandbox) {
   envContent += `# Get yours at https://firecrawl.dev\n`;
   envContent += `FIRECRAWL_API_KEY=your_firecrawl_api_key_here\n\n`;
   
-  if (sandbox === 'e2b') {
-    envContent += `# REQUIRED - Sandboxes for code execution\n`;
-    envContent += `# Get yours at https://e2b.dev\n`;
-    envContent += `E2B_API_KEY=your_e2b_api_key_here\n\n`;
-  } else if (sandbox === 'vercel') {
-    envContent += `# REQUIRED - Vercel Sandboxes\n`;
-    envContent += `# Option 1: OIDC (automatic in Vercel environment)\n`;
-    envContent += `# Option 2: Personal Access Token\n`;
-    envContent += `VERCEL_TEAM_ID=your_team_id\n`;
-    envContent += `VERCEL_PROJECT_ID=your_project_id\n`;
-    envContent += `VERCEL_TOKEN=your_access_token\n\n`;
+  if (sandbox === 'minu') {
+    envContent += `# Minu sandbox service\n`;
+    envContent += `MINU_SANDBOX_URL=http://192.168.110.93:8080\n`;
+    envContent += `MINU_SANDBOX_HOST=192.168.110.93\n\n`;
   }
   
   envContent += `# OPTIONAL - AI Providers (need at least one)\n`;

@@ -30,24 +30,11 @@ OPENAI_API_KEY=your_openai_api_key        # https://platform.openai.com
 GROQ_API_KEY=your_groq_api_key            # https://console.groq.com
 
 # =================================================================
-# SANDBOX PROVIDER - Choose ONE: Vercel (default) or E2B
+# SANDBOX (Minu backend; add providers via lib/sandbox/factory.ts)
 # =================================================================
-SANDBOX_PROVIDER=vercel  # or 'e2b'
-
-# Option 1: Vercel Sandbox (default)
-# Choose one authentication method:
-
-# Method A: OIDC Token (recommended for development)
-# Run `vercel link` then `vercel env pull` to get VERCEL_OIDC_TOKEN automatically
-VERCEL_OIDC_TOKEN=auto_generated_by_vercel_env_pull
-
-# Method B: Personal Access Token (for production or when OIDC unavailable)
-# VERCEL_TEAM_ID=team_xxxxxxxxx      # Your Vercel team ID 
-# VERCEL_PROJECT_ID=prj_xxxxxxxxx    # Your Vercel project ID
-# VERCEL_TOKEN=vercel_xxxxxxxxxxxx   # Personal access token from Vercel dashboard
-
-# Option 2: E2B Sandbox
-# E2B_API_KEY=your_e2b_api_key      # https://e2b.dev
+SANDBOX_PROVIDER=minu
+MINU_SANDBOX_URL=http://YOUR_MINU_SERVICE:8080
+MINU_SANDBOX_HOST=YOUR_MINU_PREVIEW_HOST
 ```
 
 3. **Run**

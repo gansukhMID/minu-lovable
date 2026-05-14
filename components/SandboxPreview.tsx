@@ -5,7 +5,7 @@ interface SandboxPreviewProps {
   type: 'vite' | 'nextjs' | 'console';
   output?: string;
   isLoading?: boolean;
-  sandboxUrl?: string; // Real URL from Vercel Sandbox API
+  sandboxUrl?: string; // Dev preview URL from the active SandboxProvider
 }
 
 export default function SandboxPreview({ 

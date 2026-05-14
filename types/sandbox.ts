@@ -14,7 +14,7 @@ export interface SandboxFileCache {
 
 export interface SandboxState {
   fileCache: SandboxFileCache | null;
-  sandbox: any; // E2B sandbox instance
+  sandbox: any; // SandboxProvider instance or legacy sandbox handle
   sandboxData: {
     sandboxId: string;
     url: string;
