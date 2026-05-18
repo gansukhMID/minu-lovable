@@ -101,6 +101,18 @@ class SandboxManager {
   }
 
   /**
+   * Drop a sandbox from the in-memory registry without calling provider.terminate().
+   * Use after the remote container was already destroyed (e.g. project DELETE).
+   */
+  removeFromRegistry(sandboxId: string): void {
+    if (!sandboxId) return;
+    this.sandboxes.delete(sandboxId);
+    if (this.activeSandboxId === sandboxId) {
+      this.activeSandboxId = null;
+    }
+  }
+
+  /**
    * Terminate a sandbox
    */
   async terminateSandbox(sandboxId: string): Promise<void> {

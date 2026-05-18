@@ -687,7 +687,16 @@ ${Array.isArray(planPayload.steps) ? planPayload.steps.map((s: string, i: number
         // Build system prompt with conversation awareness
         let systemPrompt = `You are an expert React + TypeScript developer with perfect memory of the conversation. You maintain context across messages: user briefs, any reference snippets in context, generated components, and applied code. Generate clean, modern React code for Vite applications (greenfield from descriptions; treat clone/scrape payloads as optional reference material, not mandatory pixel-perfect copies).
 
-SANDBOX RUNTIME: New developer sandboxes are created as **Vite + React + TypeScript** (template \`react-ts\`): typical entry is \`src/main.tsx\` and shell is \`src/App.tsx\`. Prefer **\`.tsx\` / \`.ts\`** for new components and helpers. If the file tree in context uses \`.jsx\`/\`.js\` for a given path you are editing, keep that extension for that path. Never assume vanilla (non-React) Vite — this environment is React+TS-first.
+SANDBOX RUNTIME: New developer sandboxes are provisioned as **Vite + React + TypeScript** (Minu \`react-ts\`). That is the **stock Vite react-ts starter** — it does **not** ship with Tailwind or PostCSS pre-wired. You should still style with **Tailwind utility classes in JSX**, but only **after** a working Tailwind setup exists in the project.
+- **If context shows no real Tailwind setup** (no \`tailwind.config.*\`, no \`postcss.config.*\`, or \`src/index.css\` lacks \`@tailwind\` directives), you MUST output a standard **Tailwind v3 + PostCSS + autoprefixer** stack in the **same response** as your UI:
+  1. **package.json** — merge \`devDependencies\`: \`tailwindcss\`, \`postcss\`, \`autoprefixer\`; preserve every existing dependency/script from context; never replace the file with an empty stub.
+  2. **postcss.config.js** (or \`.mjs\` / \`.cjs\` to match \`"type"\` in package.json) — \`tailwindcss\` + \`autoprefixer\` plugins.
+  3. **tailwind.config.js** (or \`.ts\`/\`.cjs\` consistent with the repo) — \`content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"]\`.
+  4. **src/index.css** — \`@tailwind base;\` \`@tailwind components;\` \`@tailwind utilities;\`
+  5. **src/main.tsx** (or entry in context) — ensure \`import './index.css'\` is present.
+- **If context already shows those files configured**, do **not** re-scaffold or duplicate; only change what the user asked for.
+- Do not assume shell commands ran — emit file contents only; missing npm packages are resolved from \`package.json\`/imports when applied.
+Typical entry is \`src/main.tsx\` and shell is \`src/App.tsx\`. Prefer **\`.tsx\` / \`.ts\`** for new components. If context shows \`.jsx\`/\`.js\` for a path, keep that extension. Never assume vanilla (non-React) Vite — React+TS-first.
 ${conversationContext}
 ${planBlock}
 
@@ -705,7 +714,8 @@ ${planBlock}
 5. **FILE COUNT LIMITS**:
    - Simple style/text change = 1 file ONLY
    - New component = 2 files MAX (component + parent)
-   - If >3 files, YOU'RE DOING TOO MUCH
+   - **Exception:** Bootstrapping Tailwind on bare \`react-ts\` (package.json merge + postcss + tailwind config + index.css + main import) counts as required setup — not “too many files” if Tailwind was missing from context.
+   - If >3 files **and** you're not doing that Tailwind bootstrap, YOU'RE DOING TOO MUCH
 6. **DO NOT CREATE SVGs FROM SCRATCH**:
    - NEVER generate custom SVG code unless explicitly asked
    - Use existing icon libraries (lucide-react, heroicons, etc.)
@@ -735,9 +745,9 @@ For a typical marketing/site build, include when appropriate (use \`.tsx\` in ne
 ${isEdit ? `CRITICAL: THIS IS AN EDIT TO AN EXISTING APPLICATION
 
 YOU MUST FOLLOW THESE EDIT RULES:
-0. NEVER create tailwind.config.js, vite.config.js, package.json, or any other config files - they already exist!
+0. Do NOT recreate \`vite.config.*\`, \`tailwind.config.*\`, \`postcss.config.*\`, or re-write \`package.json\` **when those files already appear in context with real content**. If Tailwind/PostCSS is **missing** but styled UI needs Tailwind, add the standard setup files (see SANDBOX RUNTIME) in this response—\`react-ts\` does not include them by default.
 1. DO NOT regenerate the entire application
-2. DO NOT create files that already exist (like App.jsx, index.css, tailwind.config.js)
+2. DO NOT create files that already exist (like App.jsx, index.css) unless you are **replacing** empty/stub content or adding the Tailwind stack per SANDBOX RUNTIME
 3. ONLY edit the EXACT files needed for the requested change - NO MORE, NO LESS
 4. If the user says "update the header", ONLY edit the Header component - DO NOT touch Footer, Hero, or any other components
 5. If the user says "change the color", ONLY edit the relevant style or component file - DO NOT "improve" other parts
@@ -829,7 +839,7 @@ CRITICAL INCREMENTAL UPDATE RULES:
   - Preserve all existing functionality and files
   - If adding a new page/route, integrate it with the existing routing system
   - Reference existing components and styles rather than duplicating them
-  - NEVER recreate config files (tailwind.config.js, vite.config.js, package.json, etc.)
+  - NEVER recreate config files that already exist in context (tailwind.config.js, vite.config.js, package.json, etc.) — but you MAY add Tailwind/PostCSS/package.json updates when context shows they are missing (see SANDBOX RUNTIME)
 
 IMPORTANT: When the user asks for edits or modifications:
 - You have access to the current file contents in the context
@@ -938,7 +948,7 @@ CRITICAL: When asked to create a React app or components:
 - ALWAYS CREATE EVERY COMPONENT that you import - no placeholders
 - ALWAYS IMPLEMENT COMPLETE FUNCTIONALITY - don't leave TODOs unless explicitly asked
 - If the brief describes a multi-section site or product, implement the sections it calls for completely
-- NEVER create tailwind.config.js - it's already configured in the template
+- When Tailwind is **missing** from context, CREATE/UPDATE tailwind + postcss configs + package.json + \`src/index.css\` per SANDBOX RUNTIME; when already present, do not churn them
 - When the brief implies a multi-section page, include navigation (prefer Nav.tsx / Header.tsx in TS sandboxes; match context).
 
 COMMON COMPONENTS for brief-driven apps (adapt to scope — omit what the brief doesn't need; prefer \`.tsx\` in react-ts sandbox):
@@ -947,8 +957,8 @@ COMMON COMPONENTS for brief-driven apps (adapt to scope — omit what the brief 
 3. Features/Services/Products sections — driven by the brief
 4. Footer.tsx — footer when it fits the brief
 5. App.tsx — main component that wires sections together when needed
-- NEVER create vite.config.js - it's already configured in the template
-- NEVER create package.json - it's already configured in the template
+- Do not emit a **from-scratch** \`vite.config.*\` if context already has one — only patch if required
+- Do not replace \`package.json\` wholesale — always **merge** dependencies/scripts with what context shows
 
 WHEN WORKING WITH PASTED / SUPPLIED TEXT (scraped or markdown):
 - ALWAYS sanitize all text content before using in code
@@ -964,15 +974,15 @@ WHEN WORKING WITH PASTED / SUPPLIED TEXT (scraped or markdown):
   - Also good: content: 'Moved our internal agent\\'s web scraping...'
 
 When generating code, FOLLOW THIS PROCESS:
-1. ALWAYS generate src/index.css FIRST - this establishes the styling foundation
+1. If Tailwind is missing from context: emit **package.json** (merge), **postcss** + **tailwind** configs, then **src/index.css** — see SANDBOX RUNTIME
 2. List ALL components you plan to import in App.tsx (or App.jsx if that is the app shell in context)
 3. Count them - if there are 10 imports, you MUST create 10 component files
-4. Generate src/index.css first (with proper CSS reset and base styles)
+4. Generate src/index.css early (with @tailwind directives once setup exists)
 5. Generate App.tsx second (sandbox default shell)
 6. Then generate EVERY SINGLE component file you imported
 7. Do NOT stop until all imports are satisfied
 
-Use this XML format for React components only (DO NOT create tailwind.config.js - it already exists):
+Use this XML format for React components (include Tailwind/PostCSS/package.json files when setup is missing — see SANDBOX RUNTIME):
 
 <file path="src/index.css">
 @tailwind base;
@@ -1277,6 +1287,7 @@ CRITICAL: When files are provided in the context:
             // First generation mode - make it beautiful!
             contextParts.push('\n🎨 FIRST GENERATION MODE - CREATE SOMETHING BEAUTIFUL!');
             contextParts.push('\nThis is the user\'s FIRST experience. Make it impressive:');
+            contextParts.push('0. **TAILWIND SETUP** - Default sandbox is bare react-ts (no Tailwind). If file context shows no tailwind/postcss configs, output package.json merge + tailwind + postcss + src/index.css @tailwind + main.tsx import (see SANDBOX RUNTIME in system prompt).');
             contextParts.push('1. **USE TAILWIND PROPERLY** - Use standard Tailwind color classes');
             contextParts.push('2. **NO PLACEHOLDERS** - Use real content, not lorem ipsum');
             contextParts.push('3. **COMPLETE COMPONENTS** - Header, Hero, Features, Footer minimum');

@@ -47,13 +47,14 @@ export function buildLocalFallbackPlan(
           'useState + useEffect (эсвэл useRef): секунд тэгш тоолох, пауз, дахин эхлүүлэх.',
           'Дэлгэц дээр Start / Pause / Reset товч, стандарт 25/5 мин загвар (тохируулж болно).',
           'Таймер дуусахад товч мэдэгдэл эсвэл визуал дохио (optional, энгийн).',
-          'Зөвхөн Tailwind utility класс ашиглах; шинэ *.css файл бүү үүсгэ (зөвхөн одоогийн index.css).',
-          'src/main.tsx → App импорт зөв, бүх JSX бүрэн, Vite preview анхнаасаа ажиллана.',
+          'Tailwind: template-д байхгүй тул package.json + tailwind/postcss config + src/index.css (@tailwind) нэг дор; JSX-д зөвхөн utility класс.',
+          'src/main.tsx → ./index.css импорт, App импорт зөв; бүх JSX бүрэн, Vite preview ажиллана.',
         ]
       : [
           'Оролтын шаардлагыг src/App.tsx болон шаардлагатай src/components/ файлд задлан хэрэгжүүлэх.',
-          'src/main.tsx оролт, одоогийн Vite react-ts бүтцийг хадгалах.',
-          'UI-г зөвхөн Tailwind utility-аар (layout, товчнууд, responsive).',
+          'Tailwind суулгалт: package.json devDependencies (tailwindcss, postcss, autoprefixer), tailwind.config.js, postcss.config.js, src/index.css (@tailwind) — react-ts суурьд эдгээр байхгүй.',
+          'src/main.tsx → ./index.css импорт зөв эсэх; Vite react-ts бүтцийг хадгалах.',
+          'UI зөвхөн Tailwind utility (layout, товчнууд, responsive).',
           'State болон event-уудыг React hook-оор тодорхой, уншигдахуйц бичих.',
           'Шинэ компонент бол тусад нь файл үүсгэж App-д импортлох.',
           'Файл бүрийг бүрэн агуулгаар гаргах, импорт/синтакс алдаагүй байлгах.',
@@ -64,7 +65,14 @@ export function buildLocalFallbackPlan(
       summary:
         'Анхны Vite + React + TypeScript төсөл дээр таны тайлбарт нийцсэн аппыг олон алхмаар бүтээж, гол логикийг App/компонентод төвлөрүүлнэ.',
       steps,
-      filesToTouch: ['src/App.tsx', 'src/main.tsx'],
+      filesToTouch: [
+        'package.json',
+        'tailwind.config.js',
+        'postcss.config.js',
+        'src/index.css',
+        'src/App.tsx',
+        'src/main.tsx',
+      ],
       isInitialBuild: true,
     };
   }

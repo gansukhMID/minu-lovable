@@ -154,19 +154,11 @@ function AISandboxPage() {
   const [isStartingNewGeneration, setIsStartingNewGeneration] = useState(false);
   const [sandboxFiles, setSandboxFiles] = useState<Record<string, string>>({});
   const [fileStructure, setFileStructure] = useState<string>('');
-  const [projectId, setProjectId] = useState<string | null>(() => {
-    if (typeof window !== 'undefined') {
-      return new URLSearchParams(window.location.search).get('project')
-    }
-    return null
-  });
+  const [projectId, setProjectId] = useState<string | null>(() => searchParams.get('project'));
 
-  const [projectName, setProjectName] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      return new URLSearchParams(window.location.search).get('projectName') || 'Untitled Project'
-    }
-    return 'Untitled Project'
-  });
+  const [projectName, setProjectName] = useState<string>(
+    () => searchParams.get('projectName')?.trim() || 'Untitled Project',
+  );
   const [isEditingName, setIsEditingName] = useState(false);
   const [nameInputValue, setNameInputValue] = useState('');
   const [showSandboxController, setShowSandboxController] = useState(false);
@@ -397,7 +389,16 @@ function AISandboxPage() {
         try {
           const pr = await fetch(`/api/projects/${existingProjectId}`);
           if (pr.ok) {
-            const { project } = await pr.json() as { project?: { sandbox_id?: string | null } };
+            const { project } = await pr.json() as {
+              project?: { sandbox_id?: string | null; name?: string };
+            };
+            if (
+              isMounted &&
+              project?.name &&
+              !searchParams.get('projectName')?.trim()
+            ) {
+              setProjectName(project.name);
+            }
             const sid = project?.sandbox_id;
             if (sid) {
               sandboxIdToUse = sid;
@@ -442,7 +443,7 @@ function AISandboxPage() {
                 await fetch(`/api/projects/${localProjectId}`, {
                   method: 'PUT',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ sandbox_id: data.sandboxId, sandbox_url: data.url, sandbox_provider: data.provider }),
+                  body: JSON.stringify({ sandbox_id: data.sandboxId, sandbox_url: data.url, sandbox_provider: data.provider ?? 'minu' }),
                 }).catch(() => {});
               }
             }
@@ -940,7 +941,7 @@ function AISandboxPage() {
             body: JSON.stringify({
               sandbox_id: data.sandboxId,
               sandbox_url: data.url,
-              sandbox_provider: data.provider ?? 'unknown'
+              sandbox_provider: data.provider ?? 'minu'
             })
           }).catch(e => console.error('[project] Failed to update sandbox info', e))
         }

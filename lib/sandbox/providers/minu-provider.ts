@@ -1,3 +1,9 @@
+import {
+  minuContainerDelete,
+  minuContainerStart,
+  minuContainerStop,
+  parseMinuSandboxSessionId,
+} from '../minu-container-api';
 import { SandboxProvider, SandboxInfo, SandboxProviderConfig, CommandResult } from '../types';
 
 export class MinuProvider extends SandboxProvider {
@@ -19,14 +25,6 @@ export class MinuProvider extends SandboxProvider {
   constructor(config: SandboxProviderConfig) {
     super(config);
     this.baseUrl = process.env.MINU_SANDBOX_URL || 'http://192.168.110.93:8080';
-  }
-
-  private parseSession(sessionId: string): { containerId: string; port: number } {
-    const parts = sessionId.split('-');
-    const portMatch = sessionId.match(/(\d{2,5})(?!.*\d)/);
-    const port = Number(portMatch?.[1]);
-    const containerId = parts.slice(0, -1).join('-');
-    return { containerId, port };
   }
 
   async createSandbox(): Promise<SandboxInfo> {
@@ -53,7 +51,7 @@ export class MinuProvider extends SandboxProvider {
       vite_template: string;
       container: string;
     };
-    const { port } = this.parseSession(data.sessionid);
+    const { port } = parseMinuSandboxSessionId(data.sessionid);
     if (!Number.isFinite(port)) {
       throw new Error(`[MinuProvider] Unable to parse port from sessionid: ${data.sessionid}`);
     }
@@ -89,13 +87,24 @@ export class MinuProvider extends SandboxProvider {
 
   async reconnect(sandboxId: string): Promise<SandboxInfo | null> {
     try {
-      const { containerId, port } = this.parseSession(sandboxId);
+      const { containerId, port } = parseMinuSandboxSessionId(sandboxId);
 
       const res = await fetch(`${this.baseUrl}/containers/${containerId}/info`);
       if (!res.ok) return null;
 
-      const data = await res.json() as { container: { status: string } };
-      if (data.container?.status !== 'running') return null;
+      let data = await res.json() as { container: { status: string } };
+      if (data.container?.status !== 'running') {
+        try {
+          await minuContainerStart(this.baseUrl, containerId);
+          await new Promise(r => setTimeout(r, 1500));
+          const again = await fetch(`${this.baseUrl}/containers/${containerId}/info`);
+          if (!again.ok) return null;
+          data = await again.json();
+          if (data.container?.status !== 'running') return null;
+        } catch {
+          return null;
+        }
+      }
 
       this.sessionId = sandboxId;
       this.containerId = containerId;
@@ -206,16 +215,14 @@ export class MinuProvider extends SandboxProvider {
     return this.sandboxInfo;
   }
 
-  async terminate(): Promise<void> {
+  async terminate(options?: { removeSessionFiles?: boolean; timeout?: number }): Promise<void> {
     const cid = this.containerId;
     if (cid) {
       try {
-        const res = await fetch(`${this.baseUrl}/containers/${cid}`, {
-          method: 'DELETE',
+        await minuContainerDelete(this.baseUrl, cid, {
+          removeSessionFiles: options?.removeSessionFiles,
+          timeout: options?.timeout,
         });
-        if (!res.ok) {
-          console.warn('[MinuProvider] Remote terminate returned', res.status, await res.text());
-        }
       } catch (e) {
         console.warn('[MinuProvider] Remote container delete failed (ignored):', e);
       }
@@ -230,6 +237,26 @@ export class MinuProvider extends SandboxProvider {
 
   isAlive(): boolean {
     return this.alive && this.containerId !== null;
+  }
+
+  /**
+   * Docker stop (container may be restarted with startDocker).
+   */
+  async stopDocker(timeoutSec?: number): Promise<void> {
+    const cid = this.containerId;
+    if (!cid) throw new Error('[MinuProvider] No active container');
+    await minuContainerStop(this.baseUrl, cid, { timeout: timeoutSec });
+    this.alive = false;
+  }
+
+  /**
+   * Docker start after stopDocker.
+   */
+  async startDocker(): Promise<void> {
+    const cid = this.containerId;
+    if (!cid) throw new Error('[MinuProvider] No active container');
+    await minuContainerStart(this.baseUrl, cid);
+    this.alive = true;
   }
 
   async setupViteApp(): Promise<void> {
