@@ -142,10 +142,6 @@ async function createEnvFile(projectPath, sandbox, answers) {
   envContent += `# Sandbox Provider\n`;
   envContent += `SANDBOX_PROVIDER=${sandbox}\n\n`;
   
-  // Required keys
-  envContent += `# REQUIRED - Web scraping for cloning websites\n`;
-  envContent += `FIRECRAWL_API_KEY=${answers.firecrawlApiKey || 'your_firecrawl_api_key_here'}\n\n`;
-  
   if (sandbox === 'minu') {
     envContent += `# Minu sandbox service\n`;
     envContent += `MINU_SANDBOX_URL=${answers.minuSandboxUrl || 'http://192.168.110.93:8080'}\n`;
@@ -188,10 +184,6 @@ async function createEnvExample(projectPath, sandbox) {
   
   envContent += `# Sandbox Provider\n`;
   envContent += `SANDBOX_PROVIDER=${sandbox}\n\n`;
-  
-  envContent += `# REQUIRED - Web scraping for cloning websites\n`;
-  envContent += `# Get yours at https://firecrawl.dev\n`;
-  envContent += `FIRECRAWL_API_KEY=your_firecrawl_api_key_here\n\n`;
   
   if (sandbox === 'minu') {
     envContent += `# Minu sandbox service\n`;

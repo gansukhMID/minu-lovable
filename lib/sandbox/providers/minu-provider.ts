@@ -1,7 +1,7 @@
 import { SandboxProvider, SandboxInfo, SandboxProviderConfig, CommandResult } from '../types';
 
 export class MinuProvider extends SandboxProvider {
-  private static readonly DEFAULT_VITE_TEMPLATE = 'vanilla-ts';
+  private static readonly DEFAULT_VITE_TEMPLATE = 'react-ts';
   private static readonly DEFAULT_IMAGE = 'node:20-bookworm';
 
   private sessionId: string | null = null;
@@ -207,6 +207,19 @@ export class MinuProvider extends SandboxProvider {
   }
 
   async terminate(): Promise<void> {
+    const cid = this.containerId;
+    if (cid) {
+      try {
+        const res = await fetch(`${this.baseUrl}/containers/${cid}`, {
+          method: 'DELETE',
+        });
+        if (!res.ok) {
+          console.warn('[MinuProvider] Remote terminate returned', res.status, await res.text());
+        }
+      } catch (e) {
+        console.warn('[MinuProvider] Remote container delete failed (ignored):', e);
+      }
+    }
     this.alive = false;
     this.sessionId = null;
     this.containerId = null;

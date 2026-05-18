@@ -1,6 +1,7 @@
 import { FileManifest, EditIntent, EditType } from '@/types/file-manifest';
 import { analyzeEditIntent } from '@/lib/edit-intent-analyzer';
 import { getEditExamplesPrompt, getComponentPatternPrompt } from '@/lib/edit-examples';
+import { manifestFileKey } from '@/lib/sandbox-project-path';
 
 export interface FileContext {
   primaryFiles: string[]; // Files to edit
@@ -293,7 +294,13 @@ export async function getFileContents(
   const contents: Record<string, string> = {};
   
   for (const file of files) {
-    const fileInfo = manifest.files[file];
+    let lookupKey = file;
+    if (!manifest.files[lookupKey]) {
+      const normalizedKey = manifestFileKey(file);
+      if (manifest.files[normalizedKey]) lookupKey = normalizedKey;
+    }
+
+    const fileInfo = manifest.files[lookupKey];
     if (fileInfo) {
       contents[file] = fileInfo.content;
     }

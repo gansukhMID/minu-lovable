@@ -48,18 +48,6 @@ export function getPrompts(config) {
 export function getEnvPrompts(provider) {
   const prompts = [];
 
-  prompts.push({
-    type: 'input',
-    name: 'firecrawlApiKey',
-    message: 'Firecrawl API key (for web scraping):',
-    validate: (input) => {
-      if (!input || input.trim() === '') {
-        return 'Firecrawl API key is required for web scraping functionality';
-      }
-      return true;
-    }
-  });
-
   if (provider === 'minu') {
     prompts.push({
       type: 'input',

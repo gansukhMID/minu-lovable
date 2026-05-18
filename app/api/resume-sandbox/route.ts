@@ -4,6 +4,7 @@ import { SandboxFactory } from '@/lib/sandbox/factory';
 import { MinuProvider } from '@/lib/sandbox/providers/minu-provider';
 import { hasReconnect } from '@/lib/sandbox/provider-capabilities';
 import type { SandboxState } from '@/types/sandbox';
+import { injectPreviewConsoleReporter } from '@/lib/sandbox/inject-preview-console-reporter';
 
 declare global {
   var activeSandboxProvider: any;
@@ -25,6 +26,7 @@ export async function POST(request: NextRequest) {
   if (existing && existing.isAlive()) {
     const info = existing.getSandboxInfo()!;
     console.log(`[resume-sandbox] Found live sandbox in memory: ${sandboxId}`);
+    await injectPreviewConsoleReporter(existing);
     return NextResponse.json({
       success: true,
       resumed: true,
@@ -43,6 +45,7 @@ export async function POST(request: NextRequest) {
       global.activeSandboxProvider = provider;
       global.sandboxData = { sandboxId: info.sandboxId, url: info.url };
       if (!global.existingFiles) global.existingFiles = new Set();
+      await injectPreviewConsoleReporter(provider);
       return NextResponse.json({
         success: true,
         resumed: true,
@@ -74,6 +77,7 @@ export async function POST(request: NextRequest) {
     sandboxManager.registerSandbox(newInfo.sandboxId, newProvider);
     global.activeSandboxProvider = newProvider;
     global.sandboxData = { sandboxId: newInfo.sandboxId, url: newInfo.url };
+    await injectPreviewConsoleReporter(newProvider);
     global.sandboxState = {
       fileCache: { files: {}, lastSync: Date.now(), sandboxId: newInfo.sandboxId },
       sandbox: newProvider,

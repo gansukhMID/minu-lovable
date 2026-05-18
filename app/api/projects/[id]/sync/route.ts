@@ -3,6 +3,7 @@ import { query } from '@/shared/db';
 import { sandboxManager } from '@/lib/sandbox/sandbox-manager';
 import { SandboxFactory } from '@/lib/sandbox/factory';
 import { hasReconnect } from '@/lib/sandbox/provider-capabilities';
+import { injectPreviewConsoleReporter } from '@/lib/sandbox/inject-preview-console-reporter';
 
 // POST /api/projects/[id]/sync
 export async function POST(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -48,5 +49,6 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
   );
 
   const failed = results.filter(r => r.status === 'rejected').length;
+  await injectPreviewConsoleReporter(provider);
   return NextResponse.json({ synced: files.length - failed, failed, total: files.length });
 }

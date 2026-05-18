@@ -6,12 +6,14 @@ import Button from "@/components/shared/button/Button";
 
 export default function HeroInputSubmitButton({
   dirty,
-  buttonText = "Re-imagine Site",
+  buttonText = "Open builder",
   disabled = false,
+  onClick,
 }: {
   dirty: boolean;
   buttonText?: string;
   disabled?: boolean;
+  onClick?: () => void;
 }) {
   return (
     <Button 
@@ -19,6 +21,7 @@ export default function HeroInputSubmitButton({
       size="large" 
       variant="primary"
       disabled={disabled}
+      onClick={onClick}
     >
       <AnimatedWidth>
         <AnimatePresence initial={false} mode="popLayout">

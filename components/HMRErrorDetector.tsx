@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 
 interface HMRErrorDetectorProps {
-  iframeRef: React.RefObject<HTMLIFrameElement>;
+  iframeRef: React.RefObject<HTMLIFrameElement | null>;
   onErrorDetected: (errors: Array<{ type: string; message: string; package?: string }>) => void;
 }
 

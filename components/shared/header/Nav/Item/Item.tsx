@@ -1,6 +1,6 @@
 "use client";
 
-import { JSX } from "react";
+import { type ReactNode } from "react";
 
 import { useHeaderContext } from "@/components/shared/header/HeaderContext";
 import { cn } from "@/utils/cn";
@@ -14,7 +14,7 @@ export default function HeaderNavItem({
 }: {
   label: string;
   href: string;
-  dropdown?: JSX.Element;
+  dropdown?: ReactNode;
 }) {
   const { dropdownContent, setDropdownContent, clearDropdown } =
     useHeaderContext();

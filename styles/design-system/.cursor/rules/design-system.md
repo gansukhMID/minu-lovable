@@ -1,4 +1,4 @@
-# Firecrawl Design System Rules
+# Marketing / UI Design System Rules
 
 When working with the fire-inspired design system:
 

@@ -8,6 +8,7 @@ import type { SandboxState } from '@/types/sandbox';
 import { selectFilesForEdit, getFileContents, formatFilesForAI } from '@/lib/context-selector';
 import { executeSearchPlan, formatSearchResultsForAI, selectTargetFile } from '@/lib/file-search-executor';
 import { FileManifest } from '@/types/file-manifest';
+import { canonicalProjectRelativePath, manifestFileKey } from '@/lib/sandbox-project-path';
 import type { ConversationState, ConversationMessage, ConversationEdit } from '@/types/conversation';
 import { appConfig } from '@/config/app.config';
 
@@ -83,6 +84,83 @@ function analyzeUserPreferences(messages: ConversationMessage[]): {
   };
 }
 
+/** Lightweight truncation / structural checks on LLM-generated XML-ish bundle */
+function analyzeGenerationTruncation(generatedCode: string): string[] {
+  const truncationWarnings: string[] = [];
+
+  const fileOpenCount = (generatedCode.match(/<file path="/g) || []).length;
+  const fileCloseCount = (generatedCode.match(/<\/file>/g) || []).length;
+  if (fileOpenCount !== fileCloseCount) {
+    truncationWarnings.push(`Unclosed file tags detected: ${fileOpenCount} open, ${fileCloseCount} closed`);
+  }
+
+  const truncationCheckRegex = /<file path="([^"]+)">([\s\S]*?)(?:<\/file>|$)/g;
+  let truncationMatch;
+  while ((truncationMatch = truncationCheckRegex.exec(generatedCode)) !== null) {
+    const filePath = truncationMatch[1];
+    const content = truncationMatch[2];
+
+    if (content.trim().endsWith('<') || content.trim().endsWith('</')) {
+      truncationWarnings.push(`File ${filePath} appears to have incomplete HTML tags`);
+    }
+
+    if (filePath.match(/\.(jsx?|tsx?)$/)) {
+      const openBraces = (content.match(/{/g) || []).length;
+      const closeBraces = (content.match(/}/g) || []).length;
+      const braceDiff = Math.abs(openBraces - closeBraces);
+      if (braceDiff > 3) {
+        truncationWarnings.push(
+          `File ${filePath} has severely unmatched braces (${openBraces} open, ${closeBraces} closed)`
+        );
+      }
+      if (content.length < 20 && content.includes('function') && !content.includes('}')) {
+        truncationWarnings.push(`File ${filePath} appears severely truncated`);
+      }
+    }
+  }
+
+  return truncationWarnings;
+}
+
+function collectTruncatedRepairTargets(generatedCode: string): string[] {
+  const truncatedFiles: string[] = [];
+  const fileRepairRegex = /<file path="([^"]+)">([\s\S]*?)(?:<\/file>|$)/g;
+  let rm: RegExpExecArray | null;
+  while ((rm = fileRepairRegex.exec(generatedCode)) !== null) {
+    const filePath = rm[1];
+    const content = rm[2];
+
+    const hasEllipsis =
+      content.includes('...') &&
+      !content.includes('...rest') &&
+      !content.includes('...props') &&
+      !content.includes('spread');
+
+    const endsAbruptly =
+      content.trim().endsWith('...') || content.trim().endsWith(',') || content.trim().endsWith('(');
+
+    const hasUnclosedTags =
+      content.includes('</') && !content.match(/<\/[a-zA-Z0-9]+>/) && content.includes('<');
+
+    const tooShort = content.length < 50 && !!filePath.match(/\.(jsx?|tsx?)$/);
+
+    const openBraceCount = (content.match(/{/g) || []).length;
+    const closeBraceCount = (content.match(/}/g) || []).length;
+    const hasUnmatchedBraces = Math.abs(openBraceCount - closeBraceCount) > 1;
+
+    const isTruncated =
+      (hasEllipsis && endsAbruptly) ||
+      hasUnclosedTags ||
+      (tooShort && !content.includes('export')) ||
+      hasUnmatchedBraces;
+
+    if (isTruncated) {
+      truncatedFiles.push(filePath);
+    }
+  }
+  return [...new Set(truncatedFiles)];
+}
+
 declare global {
   var sandboxState: SandboxState;
   var conversationState: ConversationState | null;
@@ -92,7 +170,13 @@ declare global {
 
 export async function POST(request: NextRequest) {
   try {
-    const { prompt, model = 'openai/gpt-oss-20b', context, isEdit = false } = await request.json();
+    const {
+      prompt,
+      model = appConfig.ai.defaultModel,
+      context,
+      isEdit = false,
+      plan,
+    } = await request.json();
     
     console.log('[generate-ai-code-stream] Received request:');
     console.log('[generate-ai-code-stream] - prompt:', prompt);
@@ -217,12 +301,16 @@ export async function POST(request: NextRequest) {
                 });
                 
                 // STEP 2: Execute the search plan
-                const searchExecution = executeSearchPlan(searchPlan, 
+                const searchExecution = executeSearchPlan(
+                  searchPlan,
                   Object.fromEntries(
-                    Object.entries(fileContents).map(([path, data]) => [
-                      path.startsWith('/') ? path : `/home/user/app/${path}`,
-                      data.content
-                    ])
+                    Object.entries(fileContents).map(([path, data]) => {
+                      const body =
+                        typeof data === 'string'
+                          ? data
+                          : ((data as { content?: string }).content ?? '');
+                      return [manifestFileKey(path), body];
+                    })
                   )
                 );
                 
@@ -251,29 +339,34 @@ export async function POST(request: NextRequest) {
                     // const fileContent = fileContents[normalizedPath]?.content || '';
                     
                     // Build enhanced context with search results
+                    const mfKey = manifestFileKey(target.filePath);
+                    const relPath = canonicalProjectRelativePath(target.filePath);
+
                     enhancedSystemPrompt = `
 ${formatSearchResultsForAI(searchExecution.results)}
 
 SURGICAL EDIT INSTRUCTIONS:
 You have been given the EXACT location of the code to edit.
-- File: ${target.filePath}
+- File (project-relative): ${relPath}
 - Line: ${target.lineNumber}
 - Reason: ${target.reason}
+
+In your output include exactly ONE <file ...> block and set path exactly to "${relPath}" (already under src/public as needed — never nest src/src/... or use /home/user/ paths).
 
 Make ONLY the change requested by the user. Do not modify any other code.
 User request: "${prompt}"`;
                     
                     // Set up edit context with just this one file
                     editContext = {
-                      primaryFiles: [target.filePath],
+                      primaryFiles: [mfKey],
                       contextFiles: [],
                       systemPrompt: enhancedSystemPrompt,
                       editIntent: {
                         type: searchPlan.editType,
                         description: searchPlan.reasoning,
-                        targetFiles: [target.filePath],
-                        confidence: 0.95, // High confidence since we found exact location
-                        searchTerms: searchPlan.searchTerms
+                        targetFiles: [mfKey],
+                        suggestedContext: [],
+                        confidence: 0.95
                       }
                     };
                     
@@ -577,17 +670,34 @@ Remember: You are a SURGEON making a precise incision, not an artist repainting 
           }
         }
         
+        const planPayload = plan && typeof plan === 'object' ? plan : null;
+        const planBlock = planPayload
+          ? `
+
+### Router plan (follow this scope; do not expand with unrelated redesigns)
+**Title:** ${String(planPayload.title ?? '')}
+**Summary:** ${String(planPayload.summary ?? '')}
+**Steps:**
+${Array.isArray(planPayload.steps) ? planPayload.steps.map((s: string, i: number) => `${i + 1}. ${s}`).join('\n') : ''}
+**Files to touch (hints):** ${Array.isArray(planPayload.filesToTouch) ? planPayload.filesToTouch.join(', ') : ''}
+**Initial greenfield build:** ${planPayload.isInitialBuild ? 'yes' : 'no'}
+`
+          : '';
+
         // Build system prompt with conversation awareness
-        let systemPrompt = `You are an expert React developer with perfect memory of the conversation. You maintain context across messages and remember scraped websites, generated components, and applied code. Generate clean, modern React code for Vite applications.
+        let systemPrompt = `You are an expert React + TypeScript developer with perfect memory of the conversation. You maintain context across messages: user briefs, any reference snippets in context, generated components, and applied code. Generate clean, modern React code for Vite applications (greenfield from descriptions; treat clone/scrape payloads as optional reference material, not mandatory pixel-perfect copies).
+
+SANDBOX RUNTIME: New developer sandboxes are created as **Vite + React + TypeScript** (template \`react-ts\`): typical entry is \`src/main.tsx\` and shell is \`src/App.tsx\`. Prefer **\`.tsx\` / \`.ts\`** for new components and helpers. If the file tree in context uses \`.jsx\`/\`.js\` for a given path you are editing, keep that extension for that path. Never assume vanilla (non-React) Vite — this environment is React+TS-first.
 ${conversationContext}
+${planBlock}
 
 🚨 CRITICAL RULES - YOUR MOST IMPORTANT INSTRUCTIONS:
 1. **DO EXACTLY WHAT IS ASKED - NOTHING MORE, NOTHING LESS**
    - Don't add features not requested
    - Don't fix unrelated issues
    - Don't improve things not mentioned
-2. **CHECK App.jsx FIRST** - ALWAYS see what components exist before creating new ones
-3. **NAVIGATION LIVES IN Header.jsx** - Don't create Nav.jsx if Header exists with nav
+2. **CHECK THE APP ENTRY FIRST** (normally \`src/App.tsx\` in fresh sandboxes) — see imports and components that already exist before creating new ones (\`App.jsx\` only if that is what appears in context)
+3. **NAVIGATION LIVES IN THE HEADER COMPONENT** — use \`Header.tsx\` / \`Header.jsx\` as in context; don't create \`Nav.tsx\`/\`Nav.jsx\` if Header already contains nav
 4. **USE STANDARD TAILWIND CLASSES ONLY**:
    - ✅ CORRECT: bg-white, text-black, bg-blue-500, bg-gray-100, text-gray-900
    - ❌ WRONG: bg-background, text-foreground, bg-primary, bg-muted, text-secondary
@@ -603,7 +713,7 @@ ${conversationContext}
    - Only create custom SVGs when user specifically requests "create an SVG" or "draw an SVG"
 
 COMPONENT RELATIONSHIPS (CHECK THESE FIRST):
-- Navigation usually lives INSIDE Header.jsx, not separate Nav.jsx
+- Navigation usually lives INSIDE Header.tsx/Header.jsx (match context), not a separate Nav file
 - Logo is typically in Header, not standalone
 - Footer often contains nav links already
 - Menu/Hamburger is part of Header, not separate
@@ -614,13 +724,13 @@ PACKAGE USAGE RULES:
 - Only add routing if building a multi-page application
 - Common packages are auto-installed from your imports
 
-WEBSITE CLONING REQUIREMENTS:
-When recreating/cloning a website, you MUST include:
-1. **Header with Navigation** - Usually Header.jsx containing nav
-2. **Hero Section** - The main landing area (Hero.jsx)
+DEFAULT LANDING SITE STRUCTURE (from a written brief OR reference pages in context — implement what matches the product, not unrelated boilerplate):
+For a typical marketing/site build, include when appropriate (use \`.tsx\` in new sandboxes unless context shows \`.jsx\`):
+1. **Header with Navigation** - Usually Header.tsx containing nav
+2. **Hero Section** - Hero.tsx
 3. **Main Content Sections** - Features, Services, About, etc.
-4. **Footer** - Contact info, links, copyright (Footer.jsx)
-5. **App.jsx** - Main app component that imports and uses all components
+4. **Footer** - Contact info, links, copyright (Footer.tsx)
+5. **App.tsx** - Main app component that imports and wires sections
 
 ${isEdit ? `CRITICAL: THIS IS AN EDIT TO AN EXISTING APPLICATION
 
@@ -704,6 +814,8 @@ THE AI INTENT ANALYZER HAS ALREADY DETERMINED THE FILES.
 DO NOT SECOND-GUESS IT.
 DO NOT ADD MORE FILES.
 ONLY OUTPUT THE EXACT FILES LISTED IN "Files to Edit".
+
+FILE PATH RULE: In each <file path="..."> tag use exactly the paths listed above (typically /src/...), or the same path without the leading slash. Never nest repeated src/ segments (src/src/...). Do NOT nest or prefix with /home/user/app or other container paths.
 ` : ''}
 
 VIOLATION OF THESE RULES WILL RESULT IN FAILURE!
@@ -726,18 +838,20 @@ IMPORTANT: When the user asks for edits or modifications:
 - If you need to see a specific file that's not in context, mention it
 
 IMPORTANT: You have access to the full conversation context including:
-- Previously scraped websites and their content
+- The user's stated goals and brief (priority)
+- Any saved reference pages/markdown in context (legacy paths may still supply this)
 - Components already generated and applied
 - The current project being worked on
 - Recent conversation history
 - Any Vite errors that need to be resolved
 
 When the user references "the app", "the website", or "the site" without specifics, refer to:
-1. The most recently scraped website in the context
+1. The user's latest brief / product description
 2. The current project name in the context
 3. The files currently in the sandbox
+4. Any reference URLs or pasted content only as supporting detail
 
-If you see scraped websites in the context, you're working on a clone/recreation of that site.
+Reference pages in context are inspiration or copy source — still ship a coherent NEW app aligned to the brief.
 
 CRITICAL UI/UX RULES:
 - NEVER use emojis in any code, text, console logs, or UI elements
@@ -796,9 +910,9 @@ CRITICAL STRING AND SYNTAX RULES:
 - When strings contain apostrophes, either:
   1. Use double quotes: "you're" instead of 'you're'
   2. Escape the apostrophe: 'you\'re'
-- When working with scraped content, ALWAYS sanitize quotes first
+- When working with pasted or externally supplied text (including scraped HTML/text), ALWAYS sanitize quotes first
 - Replace all smart quotes with straight quotes before using in code
-- Be extra careful with user-generated content or scraped text
+- Be extra careful with user-generated content or pasted text
 - Always validate that JSX syntax is correct before generating
 
 CRITICAL CODE SNIPPET DISPLAY RULES:
@@ -823,38 +937,38 @@ CRITICAL: When asked to create a React app or components:
 - ALWAYS CREATE ALL FILES IN FULL - never provide partial implementations
 - ALWAYS CREATE EVERY COMPONENT that you import - no placeholders
 - ALWAYS IMPLEMENT COMPLETE FUNCTIONALITY - don't leave TODOs unless explicitly asked
-- If you're recreating a website, implement ALL sections and features completely
+- If the brief describes a multi-section site or product, implement the sections it calls for completely
 - NEVER create tailwind.config.js - it's already configured in the template
-- ALWAYS include a Navigation/Header component (Nav.jsx or Header.jsx) - websites need navigation!
+- When the brief implies a multi-section page, include navigation (prefer Nav.tsx / Header.tsx in TS sandboxes; match context).
 
-REQUIRED COMPONENTS for website clones:
-1. Nav.jsx or Header.jsx - Navigation bar with links (NEVER SKIP THIS!)
-2. Hero.jsx - Main landing section
-3. Features/Services/Products sections - Based on the site content
-4. Footer.jsx - Footer with links and info
-5. App.jsx - Main component that imports and arranges all components
+COMMON COMPONENTS for brief-driven apps (adapt to scope — omit what the brief doesn't need; prefer \`.tsx\` in react-ts sandbox):
+1. Nav.tsx / Header.tsx (or \`.jsx\` if context shows that) — navigation when the product is a multi-section page
+2. Hero.tsx — main landing focal area when relevant
+3. Features/Services/Products sections — driven by the brief
+4. Footer.tsx — footer when it fits the brief
+5. App.tsx — main component that wires sections together when needed
 - NEVER create vite.config.js - it's already configured in the template
 - NEVER create package.json - it's already configured in the template
 
-WHEN WORKING WITH SCRAPED CONTENT:
+WHEN WORKING WITH PASTED / SUPPLIED TEXT (scraped or markdown):
 - ALWAYS sanitize all text content before using in code
 - Convert ALL smart quotes to straight quotes
 - Example transformations:
-  - "Firecrawl's API" → "Firecrawl's API" or "Firecrawl\\'s API"
+  - "Vendor's API" → escape apostrophes in JSX strings appropriately
   - 'It's amazing' → "It's amazing" or 'It\\'s amazing'
   - "Best tool ever" → "Best tool ever"
 - When in doubt, use double quotes for strings containing apostrophes
-- For testimonials or quotes from scraped content, ALWAYS clean the text:
+- For testimonials or quotes taken from pasted text, ALWAYS clean the text:
   - Bad: content: 'Moved our internal agent's web scraping...'
   - Good: content: "Moved our internal agent's web scraping..."
   - Also good: content: 'Moved our internal agent\\'s web scraping...'
 
 When generating code, FOLLOW THIS PROCESS:
 1. ALWAYS generate src/index.css FIRST - this establishes the styling foundation
-2. List ALL components you plan to import in App.jsx
+2. List ALL components you plan to import in App.tsx (or App.jsx if that is the app shell in context)
 3. Count them - if there are 10 imports, you MUST create 10 component files
 4. Generate src/index.css first (with proper CSS reset and base styles)
-5. Generate App.jsx second
+5. Generate App.tsx second (sandbox default shell)
 6. Then generate EVERY SINGLE component file you imported
 7. Do NOT stop until all imports are satisfied
 
@@ -866,12 +980,12 @@ Use this XML format for React components only (DO NOT create tailwind.config.js 
 @tailwind utilities;
 </file>
 
-<file path="src/App.jsx">
-// Main App component that imports and uses other components
+<file path="src/App.tsx">
+// Main App component that imports and uses other components (TypeScript)
 // Use Tailwind classes: className="min-h-screen bg-gray-50"
 </file>
 
-<file path="src/components/Example.jsx">
+<file path="src/components/Example.tsx">
 // Your React component code here
 // Use Tailwind classes for ALL styling
 </file>
@@ -881,14 +995,14 @@ CRITICAL COMPLETION RULES:
 2. NEVER say "Would you like me to proceed?"
 3. NEVER use <continue> tags
 4. Generate ALL components in ONE response
-5. If App.jsx imports 10 components, generate ALL 10
+5. If App.tsx imports 10 components, generate ALL 10
 6. Complete EVERYTHING before ending your response
 
 With 16,000 tokens available, you have plenty of space to generate a complete application. Use it!
 
 UNDERSTANDING USER INTENT FOR INCREMENTAL VS FULL GENERATION:
 - "add/create/make a [specific feature]" → Add ONLY that feature to existing app
-- "add a videos page" → Create ONLY Videos.jsx and update routing
+- "add a videos page" → Create ONLY Videos.tsx (or Videos.jsx matching context) and update routing if needed
 - "update the header" → Modify ONLY header component
 - "fix the styling" → Update ONLY the affected components
 - "change X to Y" → Find the file containing X and modify it
@@ -909,17 +1023,17 @@ SURGICAL EDIT RULES (CRITICAL FOR PERFORMANCE):
 - If you're editing >3 files for a simple request, STOP - you're doing too much
 
 EXAMPLES OF CORRECT SURGICAL EDITS:
-✅ "change header to black" → Find className="..." in Header.jsx, change ONLY color classes
-✅ "update hero text" → Find the <h1> or <p> in Hero.jsx, change ONLY the text inside
+✅ "change header to black" → Find className="..." in Header.tsx/jsx from context, change ONLY color classes
+✅ "update hero text" → Find the <h1> or <p> in Hero.tsx/jsx, change ONLY the text inside
 ✅ "add a button to hero" → Find the return statement, ADD button, keep everything else
-❌ WRONG: Regenerating entire Header.jsx to change one color
-❌ WRONG: Rewriting Hero.jsx to add one button
+❌ WRONG: Regenerating entire Header.tsx to change one color
+❌ WRONG: Rewriting Hero.tsx to add one button
 
 NAVIGATION/HEADER INTELLIGENCE:
-- ALWAYS check App.jsx imports first
-- Navigation is usually INSIDE Header.jsx, not separate
-- If user says "nav", check Header.jsx FIRST
-- Only create Nav.jsx if no navigation exists anywhere
+- ALWAYS check App.tsx/App.jsx imports first (TS sandboxes → App.tsx)
+- Navigation is usually INSIDE Header.tsx/Header.jsx, not separate
+- If user says "nav", check Header FIRST
+- Only create Nav.tsx/Nav.jsx if no navigation exists anywhere
 - Logo, menu, hamburger = all typically in Header
 
 CRITICAL: When files are provided in the context:
@@ -937,7 +1051,30 @@ CRITICAL: When files are provided in the context:
           if (context.sandboxId) {
             contextParts.push(`Current sandbox ID: ${context.sandboxId}`);
           }
-          
+
+          if (Array.isArray(context.previewConsoleErrors) && context.previewConsoleErrors.length > 0) {
+            const lines = context.previewConsoleErrors.slice(-25).map(
+              (
+                err: {
+                  kind?: string;
+                  message?: string;
+                  filename?: string;
+                  lineno?: number;
+                  stack?: string;
+                },
+                i: number
+              ) => {
+                const loc =
+                  err.filename != null ? ` (${err.filename}${err.lineno != null ? `:${err.lineno}` : ''})` : '';
+                const stk = err.stack ? `\n   stack: ${String(err.stack).slice(0, 800)}` : '';
+                return `  ${i + 1}. [${String(err.kind || 'error').replace(/\n/g, ' ')}] ${String(err.message || '').slice(0, 500)}${loc}${stk}`;
+              }
+            );
+            contextParts.push(
+              `\nPREVIEW WEB ERRORS (browser console/runtime only — logs and console.log are excluded):\n${lines.join('\n')}`
+            );
+          }
+
           if (context.structure) {
             contextParts.push(`Current file structure:\n${context.structure}`);
           }
@@ -986,7 +1123,7 @@ CRITICAL: When files are provided in the context:
                   
                   // Store files in cache
                   for (const [path, content] of Object.entries(filesData.files)) {
-                    const normalizedPath = path.replace('/home/user/app/', '');
+                    const normalizedPath = canonicalProjectRelativePath(path);
                     if (global.sandboxState.fileCache) {
                       global.sandboxState.fileCache.files[normalizedPath] = {
                         content: content as string,
@@ -1241,7 +1378,7 @@ CRITICAL STRING RULES TO PREVENT SYNTAX ERRORS:
 PACKAGE RULES:
 - For INITIAL generation: Use ONLY React, no external packages
 - For EDITS: You may use packages, specify them with <package> tags
-- NEVER install packages like @mendable/firecrawl-js unless explicitly requested
+- NEVER install scraping or third-party packages unless explicitly requested
 
 Examples of SYNTAX ERRORS (NEVER DO THIS):
 ❌ className="px-4 py-2 bg-blue-600 hover:bg-blue-7...
@@ -1278,7 +1415,7 @@ If you're running out of space, generate FEWER files but make them COMPLETE.
 It's better to have 3 complete files than 10 incomplete files.`
             }
           ],
-          maxTokens: 8192, // Reduce to ensure completion
+          maxOutputTokens: appConfig.ai.maxTokens,
           stopSequences: [] // Don't stop early
           // Note: Neither Groq nor Anthropic models support tool/function calling in this context
           // We use XML tags for package detection instead
@@ -1299,61 +1436,71 @@ It's better to have 3 complete files than 10 incomplete files.`
         }
         
         let result;
-        let retryCount = 0;
         const maxRetries = 2;
-        
-        while (retryCount <= maxRetries) {
+        let streamOptionsGroqFallenBack = false;
+
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
           try {
             result = await streamText(streamOptions);
-            break; // Success, exit retry loop
+            break;
           } catch (streamError: any) {
-            console.error(`[generate-ai-code-stream] Error calling streamText (attempt ${retryCount + 1}/${maxRetries + 1}):`, streamError);
-            
-            // Check if this is a Groq service unavailable error
-            const isGroqServiceError = isKimiGroq && streamError.message?.includes('Service unavailable');
-            const isRetryableError = streamError.message?.includes('Service unavailable') || 
-                                    streamError.message?.includes('rate limit') ||
-                                    streamError.message?.includes('timeout');
-            
-            if (retryCount < maxRetries && isRetryableError) {
-              retryCount++;
-              console.log(`[generate-ai-code-stream] Retrying in ${retryCount * 2} seconds...`);
-              
-              // Send progress update about retry
-              await sendProgress({ 
-                type: 'info', 
-                message: `Service temporarily unavailable, retrying (attempt ${retryCount + 1}/${maxRetries + 1})...` 
-              });
-              
-              // Wait before retry with exponential backoff
-              await new Promise(resolve => setTimeout(resolve, retryCount * 2000));
-              
-              // If Groq fails, try switching to a fallback model
-              if (isGroqServiceError && retryCount === maxRetries) {
-                console.log('[generate-ai-code-stream] Groq service unavailable, falling back to GPT-4');
-                streamOptions.model = openai('gpt-4-turbo');
-                actualModel = 'gpt-4-turbo';
-              }
-            } else {
-              // Final error, send to user
-              await sendProgress({ 
-                type: 'error', 
-                message: `Failed to initialize ${isGoogle ? 'Gemini' : isAnthropic ? 'Claude' : isOpenAI ? 'GPT-5' : isKimiGroq ? 'Kimi (Groq)' : 'Groq'} streaming: ${streamError.message}` 
-              });
-              
-              // If this is a Google model error, provide helpful info
-              if (isGoogle) {
-                await sendProgress({ 
-                  type: 'info', 
-                  message: 'Tip: Make sure your GEMINI_API_KEY is set correctly and has proper permissions.' 
+            console.error(`[generate-ai-code-stream] Error calling streamText (attempt ${attempt + 1}/${maxRetries + 1}):`, streamError);
+
+            const msg = streamError.message || '';
+            const isGroqServiceError =
+              (model === 'moonshotai/kimi-k2-instruct-0905' || model.startsWith('groq')) &&
+              (/Service unavailable/i.test(msg) || /Groq/i.test(msg));
+            const isRetryableError =
+              /Service unavailable/i.test(msg) ||
+              /rate limit/i.test(msg) ||
+              /timeout/i.test(msg);
+
+            if (attempt < maxRetries && isRetryableError) {
+              if (isGroqServiceError && isKimiGroq && !streamOptionsGroqFallenBack) {
+                console.log('[generate-ai-code-stream] Groq exhausted/unavailable — falling back to OpenAI');
+                await sendProgress({
+                  type: 'info',
+                  message: `Groq unavailable; using fallback model ${appConfig.ai.fallbackModelOpenAIId}…`,
                 });
+                streamOptions.model = openai(appConfig.ai.fallbackModelOpenAIId);
+                streamOptionsGroqFallenBack = true;
+              } else if (attempt < maxRetries - 1) {
+                console.log(`[generate-ai-code-stream] Retrying in ${(attempt + 1) * 2}s…`);
+                await sendProgress({
+                  type: 'info',
+                  message: `Service temporarily unavailable, retrying (${attempt + 2}/${maxRetries + 1})…`,
+                });
+                await new Promise((resolve) => setTimeout(resolve, (attempt + 1) * 2000));
               }
-              
-              throw streamError;
+              continue;
             }
+
+            await sendProgress({
+              type: 'error',
+              message: `Failed to initialize ${
+                isGoogle ? 'Gemini'
+                : isAnthropic ? 'Claude'
+                : isOpenAI ? 'GPT-5'
+                : isKimiGroq ? 'Kimi (Groq)'
+                : 'Groq'
+              } streaming: ${streamError.message}`,
+            });
+
+            if (isGoogle) {
+              await sendProgress({
+                type: 'info',
+                message: 'Tip: Make sure your GEMINI_API_KEY is set correctly and has proper permissions.',
+              });
+            }
+
+            throw streamError;
           }
         }
-        
+
+        if (!result) {
+          throw new Error('Failed to initialize LLM streaming after retries.');
+        }
+
         // Stream the response and parse in real-time
         let generatedCode = '';
         let currentFile = '';
@@ -1537,16 +1684,144 @@ It's better to have 3 complete files than 10 incomplete files.`
           return packages;
         }
         
-        // Parse files and send progress for each
+        // Extract explanation (after any truncation repair)
+        const explanationMatch = generatedCode.match(/<explanation>([\s\S]*?)<\/explanation>/);
+        const explanation = explanationMatch ? explanationMatch[1].trim() : '';
+
+        let truncationRecoveryPassesUsed = 0;
+        const maxRecoveryPasses = appConfig.codeApplication.enableTruncationRecovery
+          ? appConfig.codeApplication.maxTruncationRecoveryAttempts
+          : 0;
+
+        for (let pass = 0; pass < maxRecoveryPasses; pass++) {
+          let truncationWarningsPass = analyzeGenerationTruncation(generatedCode);
+          const repairTargets = collectTruncatedRepairTargets(generatedCode);
+          if (truncationWarningsPass.length === 0 && repairTargets.length === 0) {
+            break;
+          }
+          if (repairTargets.length === 0) {
+            break;
+          }
+
+          console.warn(
+            `[generate-ai-code-stream] Truncation pass ${pass + 1}/${maxRecoveryPasses}:`,
+            truncationWarningsPass
+          );
+          truncationRecoveryPassesUsed++;
+
+          await sendProgress({
+            type: 'warning',
+            message: `Detected incomplete code (pass ${pass + 1}/${maxRecoveryPasses}). Attempting to complete…`,
+            warnings: truncationWarningsPass,
+          });
+
+          for (const filePath of repairTargets) {
+            await sendProgress({
+              type: 'info',
+              message: `Completing ${filePath}…`,
+            });
+
+            try {
+              const completionPrompt = `Complete the following file that was truncated. Provide the FULL file content.
+
+File: ${filePath}
+Original request: ${prompt}
+
+Provide the complete file content without any truncation. Include all necessary imports, complete all functions, and close all tags properly.`;
+
+              let completionClient;
+              if (model.includes('gpt') || model.includes('openai')) {
+                completionClient = openai;
+              } else if (model.includes('claude')) {
+                completionClient = anthropic;
+              } else if (model === 'moonshotai/kimi-k2-instruct-0905') {
+                completionClient = groq;
+              } else {
+                completionClient = groq;
+              }
+
+              let completionModelName: string;
+              if (model === 'moonshotai/kimi-k2-instruct-0905') {
+                completionModelName = 'moonshotai/kimi-k2-instruct-0905';
+              } else if (model.includes('openai')) {
+                completionModelName = model.replace('openai/', '');
+              } else if (model.includes('anthropic')) {
+                completionModelName = model.replace('anthropic/', '');
+              } else if (model.includes('google')) {
+                completionModelName = model.replace('google/', '');
+              } else {
+                completionModelName = model;
+              }
+
+              const completionOpts: Parameters<typeof streamText>[0] = {
+                model: completionClient(completionModelName),
+                messages: [
+                  {
+                    role: 'system',
+                    content:
+                      'You are completing a truncated file. Provide the complete, working file content.',
+                  },
+                  { role: 'user', content: completionPrompt },
+                ],
+                maxOutputTokens: appConfig.ai.truncationRecoveryMaxTokens,
+              };
+              if (!model.startsWith('openai/gpt-5')) {
+                completionOpts.temperature = appConfig.ai.defaultTemperature;
+              }
+
+              const completionResult = await streamText(completionOpts);
+
+              let completedContent = '';
+              for await (const chunk of completionResult.textStream) {
+                completedContent += chunk;
+              }
+
+              const filePattern = new RegExp(
+                `<file path="${filePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}">[\\s\\S]*?(?:</file>|$)`,
+                'g'
+              );
+
+              let cleanContent = completedContent;
+              if (cleanContent.includes('```')) {
+                const codeMatch = cleanContent.match(/```[\w]*\n([\s\S]*?)```/);
+                if (codeMatch) {
+                  cleanContent = codeMatch[1];
+                }
+              }
+
+              generatedCode = generatedCode.replace(
+                filePattern,
+                `<file path="${filePath}">\n${cleanContent}\n</file>`
+              );
+
+              console.log(`[generate-ai-code-stream] Successfully completed ${filePath}`);
+            } catch (completionError) {
+              console.error(`[generate-ai-code-stream] Failed to complete ${filePath}:`, completionError);
+              await sendProgress({
+                type: 'warning',
+                message: `Could not auto-complete ${filePath}. Manual review may be needed.`,
+              });
+            }
+          }
+
+          await sendProgress({
+            type: 'info',
+            message: `Truncation recovery pass ${pass + 1} finished`,
+          });
+        }
+
+        const truncationWarningsFinal = analyzeGenerationTruncation(generatedCode);
+
+        // Parse files and send progress for each (after repair so manifests match)
         const fileRegex = /<file path="([^"]+)">([\s\S]*?)<\/file>/g;
-        const files = [];
+        const files: { path: string; content: string }[] = [];
         let match;
-        
+
         while ((match = fileRegex.exec(generatedCode)) !== null) {
           const filePath = match[1];
           const content = match[2].trim();
           files.push({ path: filePath, content });
-          
+
           // Extract packages from file content - ONLY for edits
           if (isEdit) {
             const filePackages = extractPackagesFromCode(content);
@@ -1554,244 +1829,45 @@ It's better to have 3 complete files than 10 incomplete files.`
               if (!packagesToInstall.includes(pkg)) {
                 packagesToInstall.push(pkg);
                 console.log(`[generate-ai-code-stream] Package detected from imports: ${pkg}`);
-                await sendProgress({ 
-                  type: 'package', 
+                await sendProgress({
+                  type: 'package',
                   name: pkg,
-                  message: `Package detected from imports: ${pkg}`
+                  message: `Package detected from imports: ${pkg}`,
                 });
               }
             }
           }
-          
+
           // Send progress for each file (reusing componentCount from streaming)
           if (filePath.includes('components/')) {
             const componentName = filePath.split('/').pop()?.replace('.jsx', '') || 'Component';
-            await sendProgress({ 
-              type: 'component', 
+            await sendProgress({
+              type: 'component',
               name: componentName,
               path: filePath,
-              index: componentCount
+              index: componentCount,
             });
           } else if (filePath.includes('App.jsx')) {
-            await sendProgress({ 
-              type: 'app', 
-              message: 'Generated main App.jsx',
-              path: filePath
-            });
-          }
-        }
-        
-        // Extract explanation
-        const explanationMatch = generatedCode.match(/<explanation>([\s\S]*?)<\/explanation>/);
-        const explanation = explanationMatch ? explanationMatch[1].trim() : 'Code generated successfully!';
-        
-        // Validate generated code for truncation issues
-        const truncationWarnings: string[] = [];
-        
-        // Skip ellipsis checking entirely - too many false positives with spread operators, loading text, etc.
-        
-        // Check for unclosed file tags
-        const fileOpenCount = (generatedCode.match(/<file path="/g) || []).length;
-        const fileCloseCount = (generatedCode.match(/<\/file>/g) || []).length;
-        if (fileOpenCount !== fileCloseCount) {
-          truncationWarnings.push(`Unclosed file tags detected: ${fileOpenCount} open, ${fileCloseCount} closed`);
-        }
-        
-        // Check for files that seem truncated (very short or ending abruptly)
-        const truncationCheckRegex = /<file path="([^"]+)">([\s\S]*?)(?:<\/file>|$)/g;
-        let truncationMatch;
-        while ((truncationMatch = truncationCheckRegex.exec(generatedCode)) !== null) {
-          const filePath = truncationMatch[1];
-          const content = truncationMatch[2];
-          
-          // Only check for really obvious HTML truncation - file ends with opening tag
-          if (content.trim().endsWith('<') || content.trim().endsWith('</')) {
-            truncationWarnings.push(`File ${filePath} appears to have incomplete HTML tags`);
-          }
-          
-          // Skip "..." check - too many false positives with loading text, etc.
-          
-          // Only check for SEVERE truncation issues
-          if (filePath.match(/\.(jsx?|tsx?)$/)) {
-            // Only check for severely unmatched brackets (more than 3 difference)
-            const openBraces = (content.match(/{/g) || []).length;
-            const closeBraces = (content.match(/}/g) || []).length;
-            const braceDiff = Math.abs(openBraces - closeBraces);
-            if (braceDiff > 3) { // Only flag severe mismatches
-              truncationWarnings.push(`File ${filePath} has severely unmatched braces (${openBraces} open, ${closeBraces} closed)`);
-            }
-            
-            // Check if file is extremely short and looks incomplete
-            if (content.length < 20 && content.includes('function') && !content.includes('}')) {
-              truncationWarnings.push(`File ${filePath} appears severely truncated`);
-            }
-          }
-        }
-        
-        // Handle truncation with automatic retry (if enabled in config)
-        if (truncationWarnings.length > 0 && appConfig.codeApplication.enableTruncationRecovery) {
-          console.warn('[generate-ai-code-stream] Truncation detected, attempting to fix:', truncationWarnings);
-          
-          await sendProgress({
-            type: 'warning',
-            message: 'Detected incomplete code generation. Attempting to complete...',
-            warnings: truncationWarnings
-          });
-          
-          // Try to fix truncated files automatically
-          const truncatedFiles: string[] = [];
-          const fileRegex = /<file path="([^"]+)">([\s\S]*?)(?:<\/file>|$)/g;
-          let match;
-          
-          while ((match = fileRegex.exec(generatedCode)) !== null) {
-            const filePath = match[1];
-            const content = match[2];
-            
-            // Check if this file appears truncated - be more selective
-            const hasEllipsis = content.includes('...') && 
-                               !content.includes('...rest') && 
-                               !content.includes('...props') &&
-                               !content.includes('spread');
-                               
-            const endsAbruptly = content.trim().endsWith('...') || 
-                                 content.trim().endsWith(',') ||
-                                 content.trim().endsWith('(');
-                                 
-            const hasUnclosedTags = content.includes('</') && 
-                                    !content.match(/<\/[a-zA-Z0-9]+>/) &&
-                                    content.includes('<');
-                                    
-            const tooShort = content.length < 50 && filePath.match(/\.(jsx?|tsx?)$/);
-            
-            // Check for unmatched braces specifically
-            const openBraceCount = (content.match(/{/g) || []).length;
-            const closeBraceCount = (content.match(/}/g) || []).length;
-            const hasUnmatchedBraces = Math.abs(openBraceCount - closeBraceCount) > 1;
-            
-            const isTruncated = (hasEllipsis && endsAbruptly) || 
-                               hasUnclosedTags || 
-                               (tooShort && !content.includes('export')) ||
-                               hasUnmatchedBraces;
-            
-            if (isTruncated) {
-              truncatedFiles.push(filePath);
-            }
-          }
-          
-          // If we have truncated files, try to regenerate them
-          if (truncatedFiles.length > 0) {
-            console.log('[generate-ai-code-stream] Attempting to regenerate truncated files:', truncatedFiles);
-            
-            for (const filePath of truncatedFiles) {
-              await sendProgress({
-                type: 'info',
-                message: `Completing ${filePath}...`
-              });
-              
-              try {
-                // Create a focused prompt to complete just this file
-                const completionPrompt = `Complete the following file that was truncated. Provide the FULL file content.
-                
-File: ${filePath}
-Original request: ${prompt}
-                
-Provide the complete file content without any truncation. Include all necessary imports, complete all functions, and close all tags properly.`;
-                
-                // Make a focused API call to complete this specific file
-                // Create a new client for the completion based on the provider
-                let completionClient;
-                if (model.includes('gpt') || model.includes('openai')) {
-                  completionClient = openai;
-                } else if (model.includes('claude')) {
-                  completionClient = anthropic;
-                } else if (model === 'moonshotai/kimi-k2-instruct-0905') {
-                  completionClient = groq;
-                } else {
-                  completionClient = groq;
-                }
-                
-                // Determine the correct model name for the completion
-                let completionModelName: string;
-                if (model === 'moonshotai/kimi-k2-instruct-0905') {
-                  completionModelName = 'moonshotai/kimi-k2-instruct-0905';
-                } else if (model.includes('openai')) {
-                  completionModelName = model.replace('openai/', '');
-                } else if (model.includes('anthropic')) {
-                  completionModelName = model.replace('anthropic/', '');
-                } else if (model.includes('google')) {
-                  completionModelName = model.replace('google/', '');
-                } else {
-                  completionModelName = model;
-                }
-                
-                const completionResult = await streamText({
-                  model: completionClient(completionModelName),
-                  messages: [
-                    { 
-                      role: 'system', 
-                      content: 'You are completing a truncated file. Provide the complete, working file content.'
-                    },
-                    { role: 'user', content: completionPrompt }
-                  ],
-                  temperature: model.startsWith('openai/gpt-5') ? undefined : appConfig.ai.defaultTemperature
-                });
-                
-                // Get the full text from the stream
-                let completedContent = '';
-                for await (const chunk of completionResult.textStream) {
-                  completedContent += chunk;
-                }
-                
-                // Replace the truncated file in the generatedCode
-                const filePattern = new RegExp(
-                  `<file path="${filePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}">[\\s\\S]*?(?:</file>|$)`,
-                  'g'
-                );
-                
-                // Extract just the code content (remove any markdown or explanation)
-                let cleanContent = completedContent;
-                if (cleanContent.includes('```')) {
-                  const codeMatch = cleanContent.match(/```[\w]*\n([\s\S]*?)```/);
-                  if (codeMatch) {
-                    cleanContent = codeMatch[1];
-                  }
-                }
-                
-                generatedCode = generatedCode.replace(
-                  filePattern,
-                  `<file path="${filePath}">\n${cleanContent}\n</file>`
-                );
-                
-                console.log(`[generate-ai-code-stream] Successfully completed ${filePath}`);
-                
-              } catch (completionError) {
-                console.error(`[generate-ai-code-stream] Failed to complete ${filePath}:`, completionError);
-                await sendProgress({
-                  type: 'warning',
-                  message: `Could not auto-complete ${filePath}. Manual review may be needed.`
-                });
-              }
-            }
-            
-            // Clear the warnings after attempting fixes
-            truncationWarnings.length = 0;
             await sendProgress({
-              type: 'info',
-              message: 'Truncation recovery complete'
+              type: 'app',
+              message: 'Generated main App.jsx',
+              path: filePath,
             });
           }
         }
-        
+
         // Send completion with packages info
-        await sendProgress({ 
-          type: 'complete', 
+        await sendProgress({
+          type: 'complete',
           generatedCode,
           explanation,
           files: files.length,
           components: componentCount,
           model,
           packagesToInstall: packagesToInstall.length > 0 ? packagesToInstall : undefined,
-          warnings: truncationWarnings.length > 0 ? truncationWarnings : undefined
+          warnings: truncationWarningsFinal.length > 0 ? truncationWarningsFinal : undefined,
+          truncationRecoveryPassesUsed:
+            truncationRecoveryPassesUsed > 0 ? truncationRecoveryPassesUsed : undefined,
         });
         
         // Track edit in conversation history

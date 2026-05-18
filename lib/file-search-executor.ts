@@ -86,7 +86,13 @@ export function executeSearchPlan(
         if (!matched && patterns) {
           for (const pattern of patterns) {
             try {
-              const regex = new RegExp(pattern, 'i');
+              let body = pattern;
+              let flags = 'i';
+              if (body.startsWith('(?s)')) {
+                body = body.slice(4);
+                flags = 'si'; // dotAll (Perl (?s)); requires modern JS regexp
+              }
+              const regex = new RegExp(body, flags);
               if (regex.test(line)) {
                 matched = true;
                 matchedPattern = pattern;

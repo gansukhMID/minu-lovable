@@ -4,6 +4,7 @@ import { MinuProvider } from '@/lib/sandbox/providers/minu-provider';
 // SandboxProvider type is used through SandboxFactory
 import type { SandboxState } from '@/types/sandbox';
 import { sandboxManager } from '@/lib/sandbox/sandbox-manager';
+import { injectPreviewConsoleReporter } from '@/lib/sandbox/inject-preview-console-reporter';
 
 // Store active sandbox globally
 declare global {
@@ -44,6 +45,7 @@ export async function POST() {
     
     console.log('[create-ai-sandbox-v2] Setting up Vite React app...');
     await provider.setupViteApp();
+    await injectPreviewConsoleReporter(provider);
     
     // Register with sandbox manager
     sandboxManager.registerSandbox(sandboxInfo.sandboxId, provider);

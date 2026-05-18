@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { parseJavaScriptFile, buildComponentTree } from '@/lib/file-parser';
 import { FileManifest, FileInfo, RouteInfo } from '@/types/file-manifest';
+import { canonicalProjectRelativePath } from '@/lib/sandbox-project-path';
 // SandboxState type used implicitly through global.activeSandbox
 
 declare global {
@@ -53,6 +54,12 @@ export async function GET() {
 
     if (global.activeSandboxProvider) {
       console.log('[get-sandbox-files] Fetching files via activeSandboxProvider...');
+      /** Minu /files/get returns JSON text; binaries often fail or are unsupported — omit from editable text manifest. */
+      const skipUnreadableBinaryPath = (relPath: string) =>
+        /\.(png|jpe?g|gif|webp|ico|bmp|avif|woff2?|ttf|otf|eot|mp4|webm|mp3|wav|pdf|zip|gz|tar|7z)$/i.test(
+          relPath
+        );
+
       const provider = global.activeSandboxProvider;
       const normalizeProjectPath = (filePath: string): string => {
         const trimmedPath = filePath.replace(/^\.\//, '').replace(/^\/+/, '');
@@ -131,14 +138,14 @@ export async function GET() {
         if (Array.isArray(node)) {
           return node.flatMap(item => flattenTreePaths(item));
         }
-        const collected: string[] = [];
+        const children = Array.isArray(node.children) ? node.children : [];
+        if (children.length > 0) {
+          return children.flatMap((child: any) => flattenTreePaths(child));
+        }
         if (typeof node.path === 'string' && node.path.trim()) {
-          collected.push(node.path);
+          return [node.path];
         }
-        if (Array.isArray(node.children)) {
-          collected.push(...node.children.flatMap((child: any) => flattenTreePaths(child)));
-        }
-        return collected;
+        return [];
       };
 
       let allFiles: string[] = [];
@@ -161,7 +168,7 @@ export async function GET() {
         allFiles = await provider.listFiles();
       }
       const fileList = allFiles.filter((filePath: string) => {
-        const normalizedPath = normalizeProjectPath(filePath);
+        const normalizedPath = canonicalProjectRelativePath(normalizeProjectPath(filePath));
         if (!normalizedPath) return false;
         if (normalizedPath.includes('node_modules/')) {
           return false;
@@ -171,7 +178,10 @@ export async function GET() {
 
       const filesContent: Record<string, string> = {};
       for (const filePath of fileList) {
-        const normalizedPath = normalizeProjectPath(filePath);
+        const normalizedPath = canonicalProjectRelativePath(normalizeProjectPath(filePath));
+        if (skipUnreadableBinaryPath(normalizedPath)) {
+          continue;
+        }
         try {
           const candidates = getReadCandidates(filePath, normalizedPath);
           let content: string | null = null;

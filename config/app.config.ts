@@ -5,11 +5,11 @@ export const appConfig = {
   // AI Model Configuration
   ai: {
     // Default AI model
-    defaultModel: 'openai/gpt-5',
+    defaultModel: 'openai/gpt-5.4-nano-2026-03-17',
     
     // Available models
     availableModels: [
-      'openai/gpt-5',
+      'openai/gpt-5.4-nano-2026-03-17',
       'moonshotai/kimi-k2-instruct-0905',
       'anthropic/claude-sonnet-4-20250514',
       'google/gemini-3-pro-preview'
@@ -17,7 +17,7 @@ export const appConfig = {
     
     // Model display names
     modelDisplayNames: {
-      'openai/gpt-5': 'GPT-5',
+      'openai/gpt-5.4-nano-2026-03-17': 'GPT-5.4 nano',
       'moonshotai/kimi-k2-instruct-0905': 'Kimi K2 (Groq)',
       'anthropic/claude-sonnet-4-20250514': 'Sonnet 4',
       'google/gemini-3-pro-preview': 'Gemini 3 Pro (Preview)'
@@ -37,8 +37,20 @@ export const appConfig = {
     // Max tokens for code generation
     maxTokens: 8000,
     
-    // Max tokens for truncation recovery
+    // Max tokens for truncation recovery (per-completion pass)
     truncationRecoveryMaxTokens: 4000,
+
+    /** Fallback when primary provider exhausts retries (Groq outage, rate limits); OpenAIResponses model id without prefix */
+    fallbackModelOpenAIId: 'gpt-4-turbo',
+
+    /** Cheap model for chat vs code-change routing (Vercel AI Gateway string, e.g. openai/gpt-5.4-nano-… ) */
+    routerModel: 'openai/gpt-5.4-nano-2026-03-17',
+
+    /** Max output tokens for router generateObject (multi-step plans need headroom) */
+    routerMaxTokens: 1600,
+
+    /** Client fetch timeout for /api/route-intent (ms) */
+    routerClientTimeoutMs: 15000,
   },
   
   // Code Application Configuration
@@ -49,11 +61,11 @@ export const appConfig = {
     // Delay when packages are installed (milliseconds)
     packageInstallRefreshDelay: 5000,
     
-    // Enable/disable automatic truncation recovery
-    enableTruncationRecovery: false, // Disabled - too many false positives
-    
-    // Maximum number of truncation recovery attempts per file
-    maxTruncationRecoveryAttempts: 1,
+    // Enable/disable automatic truncation recovery (heuristic + targeted complete pass)
+    enableTruncationRecovery: true,
+
+    // Full scan + recovery passes over generated bundle (until clean or exhausted)
+    maxTruncationRecoveryAttempts: 3,
   },
   
   // UI Configuration

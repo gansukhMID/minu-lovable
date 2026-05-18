@@ -153,14 +153,21 @@ export default function LivePreviewFrame({
 
   const connect = useCallback(() => {
     setIsConnecting(true);
-    // Clear any existing connection
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
     }
 
-    // Create new WebSocket connection
-    const wsUrl = `wss://${process.env.NEXT_PUBLIC_LIVECAST_HOST ?? "api.firecrawl.dev"}/agent-livecast?userProvidedId=${sessionId}`;
+    const host = process.env.NEXT_PUBLIC_LIVECAST_HOST;
+    if (!host?.trim()) {
+      console.warn(
+        "[live-preview-frame] NEXT_PUBLIC_LIVECAST_HOST is not set; live overlay stream disabled"
+      );
+      setIsConnecting(false);
+      return;
+    }
+
+    const wsUrl = `wss://${host}/agent-livecast?userProvidedId=${sessionId}`;
 
     try {
       const ws = new WebSocket(wsUrl);

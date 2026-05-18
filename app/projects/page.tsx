@@ -56,7 +56,11 @@ export default function ProjectsPage() {
     setDeleting(null)
   }
 
-  const open = (id: string) => router.push(`/generation?project=${id}`)
+  const open = (project: Project) => {
+    const qs = new URLSearchParams({ project: project.id })
+    if (project.sandbox_id) qs.set('sandbox', project.sandbox_id)
+    router.push(`/generation?${qs}`)
+  }
 
   return (
     <main className="min-h-screen p-8 max-w-4xl mx-auto">
@@ -88,7 +92,7 @@ export default function ProjectsPage() {
           {projects.map(project => (
             <Card
               key={project.id}
-              onClick={() => open(project.id)}
+              onClick={() => open(project)}
               className="cursor-pointer hover:ring-2 hover:ring-primary transition-all group"
             >
               <CardHeader>

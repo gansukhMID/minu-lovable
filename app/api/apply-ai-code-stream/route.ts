@@ -1,269 +1,43 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { parseEditBlocks } from '@/lib/parse-edit-blocks';
+import { parseEditBlocks, resolveEditApply } from '@/lib/parse-edit-blocks';
+import { parseAiCodeResponse } from '@/lib/parse-ai-response';
 // Sandbox import not needed - using global sandbox from sandbox-manager
 import type { SandboxState } from '@/types/sandbox';
 import type { ConversationState } from '@/types/conversation';
 import { sandboxManager } from '@/lib/sandbox/sandbox-manager';
+import { canonicalProjectRelativePath } from '@/lib/sandbox-project-path';
+import { validateBuild, extractMissingPackages } from '@/lib/build-validator';
+import { appConfig } from '@/config/app.config';
+import { persistApplyToProject, type PersistedFile } from '@/lib/project-persist';
 
 declare global {
   var conversationState: ConversationState | null;
   var activeSandboxProvider: any;
   var existingFiles: Set<string>;
   var sandboxState: SandboxState;
+  var lastSandboxActivityAt: number | undefined;
 }
 
-interface ParsedResponse {
-  explanation: string;
-  template: string;
-  files: Array<{ path: string; content: string }>;
-  packages: string[];
-  commands: string[];
-  structure: string | null;
-}
-
-function parseAIResponse(response: string): ParsedResponse {
-  const sections = {
-    files: [] as Array<{ path: string; content: string }>,
-    commands: [] as string[],
-    packages: [] as string[],
-    structure: null as string | null,
-    explanation: '',
-    template: ''
-  };
-
-  // Function to extract packages from import statements
-  function extractPackagesFromCode(content: string): string[] {
-    const packages: string[] = [];
-    // Match ES6 imports
-    const importRegex = /import\s+(?:(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)(?:\s*,\s*(?:\{[^}]*\}|\*\s+as\s+\w+|\w+))*\s+from\s+)?['"]([^'"]+)['"]/g;
-    let importMatch;
-
-    while ((importMatch = importRegex.exec(content)) !== null) {
-      const importPath = importMatch[1];
-      // Skip relative imports and built-in React
-      if (!importPath.startsWith('.') && !importPath.startsWith('/') &&
-        importPath !== 'react' && importPath !== 'react-dom' &&
-        !importPath.startsWith('@/')) {
-        // Extract package name (handle scoped packages like @heroicons/react)
-        const packageName = importPath.startsWith('@')
-          ? importPath.split('/').slice(0, 2).join('/')
-          : importPath.split('/')[0];
-
-        if (!packages.includes(packageName)) {
-          packages.push(packageName);
-
-          // Log important packages for debugging
-          if (packageName === 'react-router-dom' || packageName.includes('router') || packageName.includes('icon')) {
-            console.log(`[apply-ai-code-stream] Detected package from imports: ${packageName}`);
-          }
-        }
-      }
-    }
-
-    return packages;
+function readSandboxCachedFile(normPath: string): string | undefined {
+  const files = global.sandboxState?.fileCache?.files;
+  if (!files) return undefined;
+  const variants = [
+    normPath,
+    normPath.startsWith('src/') ? normPath : `src/${normPath}`,
+    normPath.replace(/^src\//, ''),
+  ];
+  for (const key of [...new Set(variants)]) {
+    const hit = files[key];
+    if (hit?.content) return hit.content as string;
   }
-
-  // Parse file sections - handle duplicates and prefer complete versions
-  const fileMap = new Map<string, { content: string; isComplete: boolean }>();
-
-  // First pass: Find all file declarations
-  const fileRegex = /<file path="([^"]+)">([\s\S]*?)(?:<\/file>|$)/g;
-  let match;
-  while ((match = fileRegex.exec(response)) !== null) {
-    const filePath = match[1];
-    const content = match[2].trim();
-    const hasClosingTag = response.substring(match.index, match.index + match[0].length).includes('</file>');
-
-    // Check if this file already exists in our map
-    const existing = fileMap.get(filePath);
-
-    // Decide whether to keep this version
-    let shouldReplace = false;
-    if (!existing) {
-      shouldReplace = true; // First occurrence
-    } else if (!existing.isComplete && hasClosingTag) {
-      shouldReplace = true; // Replace incomplete with complete
-      console.log(`[apply-ai-code-stream] Replacing incomplete ${filePath} with complete version`);
-    } else if (existing.isComplete && hasClosingTag && content.length > existing.content.length) {
-      shouldReplace = true; // Replace with longer complete version
-      console.log(`[apply-ai-code-stream] Replacing ${filePath} with longer complete version`);
-    } else if (!existing.isComplete && !hasClosingTag && content.length > existing.content.length) {
-      shouldReplace = true; // Both incomplete, keep longer one
-    }
-
-    if (shouldReplace) {
-      // Additional validation: reject obviously broken content
-      if (content.includes('...') && !content.includes('...props') && !content.includes('...rest')) {
-        console.warn(`[apply-ai-code-stream] Warning: ${filePath} contains ellipsis, may be truncated`);
-        // Still use it if it's the only version we have
-        if (!existing) {
-          fileMap.set(filePath, { content, isComplete: hasClosingTag });
-        }
-      } else {
-        fileMap.set(filePath, { content, isComplete: hasClosingTag });
-      }
-    }
-  }
-
-  // Convert map to array for sections.files
-  for (const [path, { content, isComplete }] of fileMap.entries()) {
-    if (!isComplete) {
-      console.log(`[apply-ai-code-stream] Warning: File ${path} appears to be truncated (no closing tag)`);
-    }
-
-    sections.files.push({
-      path,
-      content
-    });
-
-    // Extract packages from file content
-    const filePackages = extractPackagesFromCode(content);
-    for (const pkg of filePackages) {
-      if (!sections.packages.includes(pkg)) {
-        sections.packages.push(pkg);
-        console.log(`[apply-ai-code-stream] 📦 Package detected from imports: ${pkg}`);
-      }
-    }
-  }
-
-  // Also parse markdown code blocks with file paths
-  const markdownFileRegex = /```(?:file )?path="([^"]+)"\n([\s\S]*?)```/g;
-  while ((match = markdownFileRegex.exec(response)) !== null) {
-    const filePath = match[1];
-    const content = match[2].trim();
-    sections.files.push({
-      path: filePath,
-      content: content
-    });
-
-    // Extract packages from file content
-    const filePackages = extractPackagesFromCode(content);
-    for (const pkg of filePackages) {
-      if (!sections.packages.includes(pkg)) {
-        sections.packages.push(pkg);
-        console.log(`[apply-ai-code-stream] 📦 Package detected from imports: ${pkg}`);
-      }
-    }
-  }
-
-  // Parse plain text format like "Generated Files: Header.jsx, index.css"
-  const generatedFilesMatch = response.match(/Generated Files?:\s*([^\n]+)/i);
-  if (generatedFilesMatch) {
-    // Split by comma first, then trim whitespace, to preserve filenames with dots
-    const filesList = generatedFilesMatch[1]
-      .split(',')
-      .map(f => f.trim())
-      .filter(f => f.endsWith('.jsx') || f.endsWith('.js') || f.endsWith('.tsx') || f.endsWith('.ts') || f.endsWith('.css') || f.endsWith('.json') || f.endsWith('.html'));
-    console.log(`[apply-ai-code-stream] Detected generated files from plain text: ${filesList.join(', ')}`);
-
-    // Try to extract the actual file content if it follows
-    for (const fileName of filesList) {
-      // Look for the file content after the file name
-      const fileContentRegex = new RegExp(`${fileName}[\\s\\S]*?(?:import[\\s\\S]+?)(?=Generated Files:|Applying code|$)`, 'i');
-      const fileContentMatch = response.match(fileContentRegex);
-      if (fileContentMatch) {
-        // Extract just the code part (starting from import statements)
-        const codeMatch = fileContentMatch[0].match(/^(import[\s\S]+)$/m);
-        if (codeMatch) {
-          const filePath = fileName.includes('/') ? fileName : `src/components/${fileName}`;
-          sections.files.push({
-            path: filePath,
-            content: codeMatch[1].trim()
-          });
-          console.log(`[apply-ai-code-stream] Extracted content for ${filePath}`);
-
-          // Extract packages from this file
-          const filePackages = extractPackagesFromCode(codeMatch[1]);
-          for (const pkg of filePackages) {
-            if (!sections.packages.includes(pkg)) {
-              sections.packages.push(pkg);
-              console.log(`[apply-ai-code-stream] Package detected from imports: ${pkg}`);
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // Also try to parse if the response contains raw JSX/JS code blocks
-  const codeBlockRegex = /```(?:jsx?|tsx?|javascript|typescript)?\n([\s\S]*?)```/g;
-  while ((match = codeBlockRegex.exec(response)) !== null) {
-    const content = match[1].trim();
-    // Try to detect the file name from comments or context
-    const fileNameMatch = content.match(/\/\/\s*(?:File:|Component:)\s*([^\n]+)/);
-    if (fileNameMatch) {
-      const fileName = fileNameMatch[1].trim();
-      const filePath = fileName.includes('/') ? fileName : `src/components/${fileName}`;
-
-      // Don't add duplicate files
-      if (!sections.files.some(f => f.path === filePath)) {
-        sections.files.push({
-          path: filePath,
-          content: content
-        });
-
-        // Extract packages
-        const filePackages = extractPackagesFromCode(content);
-        for (const pkg of filePackages) {
-          if (!sections.packages.includes(pkg)) {
-            sections.packages.push(pkg);
-          }
-        }
-      }
-    }
-  }
-
-  // Parse commands
-  const cmdRegex = /<command>(.*?)<\/command>/g;
-  while ((match = cmdRegex.exec(response)) !== null) {
-    sections.commands.push(match[1].trim());
-  }
-
-  // Parse packages - support both <package> and <packages> tags
-  const pkgRegex = /<package>(.*?)<\/package>/g;
-  while ((match = pkgRegex.exec(response)) !== null) {
-    sections.packages.push(match[1].trim());
-  }
-
-  // Also parse <packages> tag with multiple packages
-  const packagesRegex = /<packages>([\s\S]*?)<\/packages>/;
-  const packagesMatch = response.match(packagesRegex);
-  if (packagesMatch) {
-    const packagesContent = packagesMatch[1].trim();
-    // Split by newlines or commas
-    const packagesList = packagesContent.split(/[\n,]+/)
-      .map(pkg => pkg.trim())
-      .filter(pkg => pkg.length > 0);
-    sections.packages.push(...packagesList);
-  }
-
-  // Parse structure
-  const structureMatch = /<structure>([\s\S]*?)<\/structure>/;
-  const structResult = response.match(structureMatch);
-  if (structResult) {
-    sections.structure = structResult[1].trim();
-  }
-
-  // Parse explanation
-  const explanationMatch = /<explanation>([\s\S]*?)<\/explanation>/;
-  const explResult = response.match(explanationMatch);
-  if (explResult) {
-    sections.explanation = explResult[1].trim();
-  }
-
-  // Parse template
-  const templateMatch = /<template>(.*?)<\/template>/;
-  const templResult = response.match(templateMatch);
-  if (templResult) {
-    sections.template = templResult[1].trim();
-  }
-
-  return sections;
+  return undefined;
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const { response, isEdit = false, packages = [], sandboxId } = await request.json();
+    const { response, isEdit = false, packages = [], sandboxId, projectId: incomingProjectId } = await request.json();
+    const parsedProjectId =
+      typeof incomingProjectId === 'string' && incomingProjectId.length > 0 ? incomingProjectId : undefined;
 
     if (!response) {
       return NextResponse.json({
@@ -279,7 +53,11 @@ export async function POST(request: NextRequest) {
     console.log('[apply-ai-code-stream] packages:', packages);
 
     // Parse the AI response
-    const parsed = parseAIResponse(response);
+    const parsed = parseAiCodeResponse(response, {
+      extractPackagesFromImports: true,
+      extendedHeuristics: true,
+      logPrefix: '[apply-ai-code-stream]',
+    });
     const editBlocks = parseEditBlocks(response);
     console.log('[apply-ai-code-stream] Parsed <edit> blocks:', editBlocks.length);
     
@@ -394,7 +172,7 @@ export async function POST(request: NextRequest) {
     };
 
     // Start processing in background (pass provider and request to the async function)
-    (async (providerInstance, req) => {
+    (async (providerInstance, req, projId?: string) => {
       const results = {
         filesCreated: [] as string[],
         filesUpdated: [] as string[],
@@ -404,6 +182,8 @@ export async function POST(request: NextRequest) {
         commandsExecuted: [] as string[],
         errors: [] as string[]
       };
+
+      const persistedWrites: PersistedFile[] = [];
 
       try {
         await sendProgress({
@@ -521,18 +301,39 @@ export async function POST(request: NextRequest) {
         });
 
         if (editBlocks.length > 0 && filteredFiles.length === 0) {
-          filteredFiles = editBlocks
-            .filter(edit => typeof edit.update === 'string' && edit.update.trim().length > 0)
-            .map(edit => ({
-              path: edit.targetFile,
-              content: edit.update
-            }));
-          await sendProgress({
-            type: 'warning',
-            message: `Using direct file-write fallback for ${filteredFiles.length} <edit> block(s).`
-          });
+          const fromEdits: Array<{ path: string; content: string }> = [];
+          for (const edit of editBlocks) {
+            if (typeof edit.update !== 'string' || !edit.update.trim()) continue;
+            const normalizedForCache = canonicalProjectRelativePath(edit.targetFile);
+            const existingBody = readSandboxCachedFile(normalizedForCache);
+            const resolved = resolveEditApply(edit, existingBody);
+            if (!resolved.ok) {
+              console.warn(resolved.reason);
+              await sendProgress({ type: 'warning', message: resolved.reason });
+              continue;
+            }
+            fromEdits.push({ path: edit.targetFile, content: resolved.content });
+          }
+          filteredFiles = fromEdits;
+          if (filteredFiles.length > 0) {
+            await sendProgress({
+              type: 'warning',
+              message: `Using <edit> fallback for ${filteredFiles.length} file(s) (patch where possible).`,
+            });
+          }
         }
 
+        let hardReloadSuggested =
+          uniquePackages.length > 0 ||
+          filteredFiles.some((file) => {
+            const base = (canonicalProjectRelativePath(file.path).split('/').pop() || '').toLowerCase();
+            return (
+              base === 'package.json' ||
+              base === 'vite.config.ts' ||
+              base === 'vite.config.js' ||
+              base === 'vite.config.mts'
+            );
+          });
         
         for (const [index, file] of filteredFiles.entries()) {
           try {
@@ -545,11 +346,8 @@ export async function POST(request: NextRequest) {
               action: 'creating'
             });
 
-            // Normalize the file path
-            let normalizedPath = file.path;
-            if (normalizedPath.startsWith('/')) {
-              normalizedPath = normalizedPath.substring(1);
-            }
+            // Normalize duplicated container paths (/home/user/app/src/…) to vite-relative paths.
+            let normalizedPath = canonicalProjectRelativePath(file.path);
             if (!normalizedPath.startsWith('src/') &&
               !normalizedPath.startsWith('public/') &&
               normalizedPath !== 'index.html' &&
@@ -583,6 +381,8 @@ export async function POST(request: NextRequest) {
 
             // Write the file using provider
             await providerInstance.writeFile(normalizedPath, fileContent);
+
+            persistedWrites.push({ path: normalizedPath, content: fileContent });
 
             // Update file cache
             if (global.sandboxState?.fileCache) {
@@ -683,13 +483,97 @@ export async function POST(request: NextRequest) {
           }
         }
 
+        // Step 3.5: Validate preview / recover missing packages from Vite errors
+        let buildValidation: {
+          success: boolean;
+          errors: string[];
+          isRendering: boolean;
+          missingPackagesDetected: string[];
+          missingPackagesInstalled: string[];
+          retried: boolean;
+        } | null = null;
+
+        try {
+          const sandboxInfo = providerInstance.getSandboxInfo?.();
+          const previewUrl = sandboxInfo?.url as string | undefined;
+          const effectiveId = (sandboxId || sandboxInfo?.sandboxId) as string | undefined;
+          if (previewUrl && effectiveId) {
+            await sendProgress({
+              type: 'step',
+              step: 4,
+              message: 'Verifying preview build…',
+            });
+            let v = await validateBuild(previewUrl, effectiveId);
+            const errorText = v.errors.join('\n');
+            let missing = extractMissingPackages({ message: errorText }).filter(
+              (p) => !p.startsWith('.') && !p.startsWith('@/')
+            );
+            missing = [...new Set(missing)];
+            const installedFromErrors: string[] = [];
+            let retried = false;
+
+            if (!v.success && missing.length > 0) {
+              await sendProgress({
+                type: 'info',
+                message: `Build check reported missing modules; installing: ${missing.join(', ')}`,
+              });
+              const flag = appConfig.packages.useLegacyPeerDeps ? ' --legacy-peer-deps' : '';
+              const installCmd = `npm install ${missing.join(' ')}${flag}`.trim();
+              const installResult = await providerInstance.runCommand(installCmd);
+              retried = true;
+              if (installResult.exitCode === 0) {
+                installedFromErrors.push(...missing);
+                missing.forEach((p) => {
+                  if (!results.packagesInstalled.includes(p)) results.packagesInstalled.push(p);
+                });
+                if (appConfig.packages.autoRestartVite) {
+                  try {
+                    await providerInstance.runCommand('pkill -f vite || true');
+                    await new Promise((r) => setTimeout(r, 1500));
+                    await providerInstance.runCommand('nohup npm run dev > /tmp/vite.log 2>&1 &');
+                    await new Promise((r) => setTimeout(r, 2000));
+                  } catch (re) {
+                    console.warn('[apply-ai-code-stream] Vite restart after error-install:', re);
+                  }
+                }
+                v = await validateBuild(previewUrl, effectiveId);
+              }
+            }
+
+            buildValidation = {
+              success: v.success,
+              errors: v.errors,
+              isRendering: v.isRendering,
+              missingPackagesDetected: missing,
+              missingPackagesInstalled: installedFromErrors,
+              retried,
+            };
+          }
+        } catch (bvErr) {
+          console.warn('[apply-ai-code-stream] Build validation skipped/failed:', bvErr);
+        }
+
+        if ((buildValidation?.missingPackagesInstalled?.length ?? 0) > 0) {
+          hardReloadSuggested = true;
+        }
+
+        globalThis.lastSandboxActivityAt = Date.now();
+
+        let snapshotId: string | undefined;
+        if (projId && persistedWrites.length > 0) {
+          snapshotId = await persistApplyToProject(projId, persistedWrites, parsed.explanation || 'Code apply');
+        }
+
         // Send final results
         await sendProgress({
           type: 'complete',
           results,
           explanation: parsed.explanation,
           structure: parsed.structure,
-          message: `Successfully applied ${results.filesCreated.length} files`
+          message: `Successfully applied ${results.filesCreated.length} files`,
+          buildValidation: buildValidation ?? undefined,
+          hardReloadSuggested,
+          snapshotId,
         });
 
         // Track applied files in conversation state
@@ -725,7 +609,7 @@ export async function POST(request: NextRequest) {
       } finally {
         await writer.close();
       }
-    })(provider, request);
+    })(provider, request, parsedProjectId);
 
     // Return the stream
     return new Response(stream.readable, {
